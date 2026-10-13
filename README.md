@@ -23,8 +23,15 @@ top 面不使用，也不会被程序改写。
 
 ## 使用
 
-将单文件 engine.lua 放入 CC 文件系统，运行 `engine`。
-发布到公开 GitHub 仓库后，可以用仓库里的原始文件 URL 执行 `wget URL engine.lua` 安装。
+将单文件 engine.lua 放入 CC 文件系统，运行 `engine`。仓库发布后，在 CC 命令行逐行输入：
+
+```text
+wget https://raw.githubusercontent.com/ch126/cc-rocket-control/main/engine.lua engine.lua
+engine
+```
+
+更新时先退出控制程序，再下载为 `engine-new.lua`，确认下载成功后备份旧文件并更名。
+无需安装到 startup.lua，避免开机自动进入控制界面。CC 的 HTTP 下载功能需要开启。
 
 | 按键 | 功能 |
 | --- | --- |
@@ -49,3 +56,12 @@ top 面不使用，也不会被程序改写。
 - 无需额外安装模组；当前目标环境 CC: Tweaked 1.120.2、Create Propulsion 1.1.5。
 
 接口依据：https://tweaked.cc/module/redstone.html
+
+## 本地测试
+
+测试仅模拟 CC 事件与红石 API，不代表通过游戏物理飞行测试。
+
+```text
+python -m pip install --target .test-deps lupa==2.8
+python test_engine.py
+```
