@@ -35,7 +35,7 @@ for columns in ([[0,0],[0,0]], [[1,0],[2,0]]):
     try: mod.matrix(lua.table_from([lua.table_from(v) for v in columns])); raise AssertionError('accepted bad axes')
     except Exception as exc: assert 'response' in str(exc) or 'overlap' in str(exc)
 
-def simulate(actions, blocked=False, reverse=False, gain=.08):
+def simulate(actions, blocked=False, reverse=False, gain=.08, api_delay=0):
     runtime=LuaRuntime(unpack_returned_tuples=True)
     runtime.execute('''
       now=0; currentTimer=0; outputs={top=9}; snapshots={}; frame={}
@@ -65,18 +65,8 @@ def simulate(actions, blocked=False, reverse=False, gain=.08):
     results=[]
     ax=az=wx=wz=0.0
     events=iter(actions)
-    def pull():
+    def advance(dt):
         nonlocal ax,az,wx,wz
-        results.append((float(g.now),dict(g.outputs),list(g.lines.values()),ax,az))
-        action=next(events,('quit',))
-        kind=action[0]
-        if kind=='key': return 'key',g['keys'][action[1]],False
-        if kind=='quit': return 'terminate',None,None
-        if kind=='fault': g.frame.sensorError=True
-        if kind=='detach': g.frame.detached=True
-        if kind=='mass': g.frame.mass=120
-        if kind=='kick': ax+=action[1]; az+=action[2]
-        dt=action[1] if kind=='delay' else .1
         # Simple free-body plant: two independently measurable torque axes.
         # Reversed/crossed wiring is supported by measuring the response matrix.
         out=dict(g.outputs)
@@ -93,7 +83,30 @@ def simulate(actions, blocked=False, reverse=False, gain=.08):
         f=math.sin(angle/2)/angle if angle else .5
         g.frame.qx=ax*f; g.frame.qz=az*f; g.frame.qw=math.cos(angle/2)
         g.now+=dt
+    def pull():
+        nonlocal ax,az
+        results.append((float(g.now),dict(g.outputs),list(g.lines.values()),ax,az))
+        action=next(events,('quit',))
+        kind=action[0]
+        if kind=='key': return 'key',g['keys'][action[1]],False
+        if kind=='quit': return 'terminate',None,None
+        if kind=='fault': g.frame.sensorError=True
+        if kind=='detach': g.frame.detached=True
+        if kind=='mass': g.frame.mass=120
+        if kind=='kick': ax+=action[1]; az+=action[2]
+        advance(action[1] if kind=='delay' else .1)
         return 'timer',g.currentTimer,None
+    def api_wait(): advance(api_delay)
+    g.api_wait=api_wait
+    runtime.execute('''
+      for name,fn in pairs(sublevel) do
+        sublevel[name]=function(...)
+          api_wait()
+          if frame.detached and name~='isInPlotGrid' then error('NO SUBLEVEL') end
+          return fn(...)
+        end
+      end
+    ''')
     g.os.pullEventRaw=pull
     runtime.execute(SOURCE)
     assert g.outputs.top==9
@@ -111,7 +124,7 @@ for reverse in (False,True):
     assert after and max(math.hypot(x[3],x[4]) for x in after)<.08, 'failed to settle'
     assert all(max(x[1]['front'],x[1]['back'],x[1]['left'],x[1]['right'])<=3 for x in r)
 for fault in [('fault',),('detach',),('mass',),('delay',.6)]:
-    r=simulate(setup+[key('h'),fault]+ticks*2)
+    r=simulate(setup+[key('h'),fault]+ticks*15)
     assert r[-1][1]['bottom']==0, fault
 r=simulate(setup,blocked=True)
 assert not any('calibration OK' in ' '.join(x[2]) for x in r)
@@ -125,3 +138,17 @@ assert r[-1][1]['bottom']==0 and not any('ARMED HOLD' in s for s in r[-1][2])
 r=simulate(ticks+[key('u'),key('e'),key('r'),key('k'),key('c')]+ticks)
 assert r[-1][1]['bottom']==1 and r[-1][1]['front']==0
 print('PASS: quaternion formats/signs/rotation, body-rate math, yaw freedom, singular-response rejection, real calibration state machine, swapped/reversed wiring, hold settling, bounds, missing calibration, blocked craft, sensor loss, craft detach, mass change, delayed loop, exit cleanup.')
+
+# Regression: each real Sable call can wait a server tick (or two).
+# The old five-call loop exceeds 0.35s at 0.06s/call plus 0.1s timer.
+for latency in (.05,.06,.1):
+    r=simulate(setup+[key('h')]+ticks*60,api_delay=latency,gain=.05)
+    text='\n'.join(' '.join(x[2]) for x in r)
+    assert 'calibration OK' in text, (latency, text[-1500:])
+    assert 'ARMED HOLD' in text, (latency, text[-1500:])
+    assert 'allowed 0.025-0.350s' not in text, (latency, text[-1500:])
+    assert r[-1][1]['bottom']==5, (latency, text[-1500:])
+r=simulate(setup+[key('h'),('delay',.6)]+ticks*2,api_delay=.05,gain=.05)
+assert r[-1][1]['bottom']==0
+assert any('Sample dt=' in ' '.join(x[2]) and 'allowed' in ' '.join(x[2]) for x in r)
+print('PASS: 50/60/100ms per-API scheduling delay, calibration and hold with slow status refresh, genuine 600ms stall still stops and reports interval.')

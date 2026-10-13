@@ -1,4 +1,4 @@
--- v0.2.0 experimental upright hold. Single-file CC: Tweaked program.
+-- v0.2.1 experimental upright hold. Single-file CC: Tweaked program.
 -- Keep engine.lua for manual testing. Run only one controller at a time.
 local args = {...}
 local M = {}
@@ -83,6 +83,8 @@ local armed,throttle,pitch,yaw=false,0,0,0
 local mode,message="MANUAL","Stand upright and still; press U to set UP."
 local basis,referenceId,matrix,calThrottle,calMass,cal=nil,nil,nil,nil,nil,nil
 local lastQ,lastTime,telemetry=nil,nil,nil
+local status,statusSlot,statusDue=nil,1,0
+local lastInterval=nil
 local running=true
 local function clear()
   local errors={}
@@ -107,18 +109,43 @@ local function apply()
   pair("front","back",pitch); pair("right","left",yaw)
   redstone.setAnalogOutput("bottom",throttle)
 end
+-- CC: Sable methods run on the server thread and may each yield a game tick.
+-- Bootstrap at zero thrust; thereafter do at most ONE status call per sample.
+-- Pose is always read LAST so its timestamp isn't aged by other API calls.
+local function statusCheck(slot)
+  if slot==1 then
+    assert(sublevel.isInPlotGrid(),"Computer must be on an assembled craft")
+  elseif slot==2 then status.id=sublevel.getUniqueId()
+  elseif slot==3 then
+    local mass=sublevel.getMass()
+    assert(finite(mass) and mass>0,"Invalid mass")
+    status.mass=mass
+  else
+    status.velocity=checked(sublevel.getLinearVelocity())
+    status.velocityTime=os.clock()
+  end
+end
 local function readTelemetry()
-  assert(sublevel and sublevel.isInPlotGrid(),"Computer must be on an assembled craft")
+  assert(sublevel,"CC: Sable API unavailable")
+  if not status then
+    status={}
+    for i=1,4 do statusCheck(i) end
+    statusSlot,statusDue=1,os.clock()+0.25
+  elseif os.clock()>=statusDue then
+    statusCheck(statusSlot)
+    statusSlot=statusSlot%4+1
+    statusDue=os.clock()+0.25
+  end
   local pose=sublevel.getLogicalPose()
   local q=M.quaternion(pose.orientation)
   local now=os.clock()
   local dt=lastTime and now-lastTime or nil
   local w=lastQ and dt and dt>0 and M.rate(lastQ,q,dt) or vec(0,0,0)
-  local velocity=checked(sublevel.getLinearVelocity())
-  local mass=sublevel.getMass(); assert(finite(mass) and mass>0,"Invalid mass")
-  local t={q=q,w=w,dt=dt,time=now,velocity=velocity,mass=mass,id=sublevel.getUniqueId()}
+  local t={q=q,w=w,dt=dt,time=now,velocity=status.velocity,
+    velocityAge=now-status.velocityTime,mass=status.mass,id=status.id}
   checked(pose.position)
   lastQ,lastTime=q,now
+  if dt then lastInterval=dt end
   if basis then t.e1,t.e2,t.tilt=M.error(q,basis) end
   return t
 end
@@ -168,7 +195,8 @@ local function tick()
     invalidate("Mass changed >5%. Recalibrate."); return
   end
   if mode~="MANUAL" then
-    assert(t.dt and t.dt>=0.025 and t.dt<=0.35,"Control loop delayed")
+    assert(t.dt and t.dt>=0.025 and t.dt<=0.35+1e-6,
+      ("Sample dt=%s; allowed 0.025-0.350s"):format(t.dt and ("%.3fs"):format(t.dt) or "missing"))
     assert(t.tilt<math.rad(25),"Tilt exceeded 25 degrees; test stopped")
     assert(norm(t.w)<1.5,"Rotation too fast; test stopped")
   end
@@ -181,13 +209,14 @@ local function tick()
 end
 local function draw()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.2.0 - experimental upright hold")
+  print("ROCKET v0.2.1 - experimental upright hold")
   print((armed and "ARMED " or "DISARMED ")..mode)
   print(("Thrust %d/15 | F/B %+d R/L %+d"):format(throttle,pitch,yaw))
   if telemetry then
     print(("Mass %.1f | vertical speed %+.2f"):format(telemetry.mass,telemetry.velocity.y))
     print(("Tilt %s | calibration %s"):format(telemetry.tilt and ("%.1f deg"):format(math.deg(telemetry.tilt)) or "unset",matrix and "OK" or "needed"))
   else print("Telemetry unavailable") end
+  print(("Sample dt: %s | status: slow refresh"):format(lastInterval and ("%.3fs"):format(lastInterval) or "warming up"))
   print("U Set UP (disarmed, physically upright)")
   print("E Arm/disarm | R/F thrust +/-")
   print("W/S D/A manual trim | C center/manual")
@@ -206,7 +235,7 @@ local function handleKey(k)
   end
   if k==keys.u and not armed then
     local t=telemetry
-    assert(t and os.clock()-t.time<=0.25 and t.dt and t.dt>0 and norm(t.w)<0.03 and norm(t.velocity)<0.2,"Set UP only while still with fresh telemetry")
+    assert(t and os.clock()-t.time<=0.25 and t.dt and t.dt>0 and t.velocityAge<2 and norm(t.w)<0.03 and norm(t.velocity)<0.2,"Set UP only while still with fresh telemetry")
     basis=M.basis(t.q); referenceId=t.id
     matrix,calThrottle,calMass=nil,nil,nil
     message="UP set. Next: manual test, then K calibration."
@@ -241,7 +270,10 @@ local function main()
   stop("Stand upright and still; press U to set UP.")
   local function sample()
     local ok,err=pcall(tick)
-    if not ok then invalidate(tostring(err)); telemetry=nil; lastQ,lastTime=nil,nil end
+    if not ok then
+      invalidate(tostring(err)); telemetry=nil; lastQ,lastTime=nil,nil
+      status=nil -- Re-bootstrap after an API error, with outputs already zero.
+    end
   end
   sample(); draw()
   local timer=os.startTimer(0.1)
