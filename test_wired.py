@@ -23,7 +23,8 @@ _runtimes=[]
 def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
              fail_method=None, blocked=False, reverse=False, gain=.05, hover=5,
              initial_throttle=0, cap=6666666.666667, smoothing=True,
-             source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False):
+             source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False,
+             vertical_gain=1):
     lua=LuaRuntime(unpack_returned_tuples=True)
     _runtimes.append(lua)
     lua.execute('collectgarbage("stop")')
@@ -161,7 +162,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
                 tx,tz=(-yaw*gain,pitch*gain) if reverse else (pitch*gain,yaw*gain)
                 wx+=tx*h; wz+=tz*h; ax+=wx*h; az+=wz*h
                 if airborne:
-                    vy+=(power*math.cos(math.hypot(ax,az))-hover)*h
+                    vy+=(power*math.cos(math.hypot(ax,az))-hover)*vertical_gain*h
                     y+=vy*h
                     if horizontal:
                         angle=math.hypot(ax,az)

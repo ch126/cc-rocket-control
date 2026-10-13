@@ -1,4 +1,4 @@
--- v0.5.2 bounded timing tolerance and local diagnostic flight log.
+-- v0.5.3 fractional-demand pulse averaging and slower height control.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -90,13 +90,24 @@ function M.command(matrix,e1,e2,w1,w2,ratio,state,dt)
   x,y=x+state.i1,y+state.i2
   local u=(matrix.d*x-matrix.b*y)/matrix.det/ratio
   local v=(-matrix.c*x+matrix.a*y)/matrix.det/ratio
-  local function quantize(n,previous)
+  local function quantize(n,previous,balance)
     n=clamp(n,-2,2)
-    if math.abs(n-previous)<0.6 then return previous end -- hysteresis avoids threshold chatter
-    local rounded=(n<0 and -1 or 1)*math.floor(math.abs(n)+0.5)
-    return clamp(rounded,previous-1,previous+1) -- at most one step per sample
+    if dt<=0 then
+      -- Late sample: update coarse proportional/damping correction, but do not
+      -- accumulate pulse time or integral through the uncertain interval.
+      local rounded=(n<0 and -1 or 1)*math.floor(math.abs(n)+0.5)
+      return clamp(rounded,previous-1,previous+1),balance or 0
+    end
+    -- Integrate fractional demand in step-seconds. A small persistent demand
+    -- produces occasional real one-step pulses instead of rounding to zero forever.
+    local accumulated=clamp((balance or 0)+n*dt,-2*dt,2*dt)
+    local equivalent=accumulated/dt
+    local rounded=(equivalent<0 and -1 or 1)*math.floor(math.abs(equivalent)+0.5)
+    local output=clamp(rounded,previous-1,previous+1)
+    return output,clamp(accumulated-output*dt,-0.2,0.2)
   end
-  state.u,state.v=quantize(u,state.u),quantize(v,state.v)
+  state.u,state.bu=quantize(u,state.u,state.bu)
+  state.v,state.bv=quantize(v,state.v,state.bv)
   return state.u,state.v
 end
 function M.navigation(target,p,v,state,dt)
@@ -127,19 +138,23 @@ function M.heightStep(a,y,vy,dt,tilt,calibrationThrottle)
     else feed=-0.3 end
   end
   local errorY=a.target-y
-  local targetV=clamp(0.6*errorY+feed,-0.6,0.6)
+  local targetV=clamp(0.25*errorY+feed,-0.4,0.4)
   local errorV=targetV-vy
-  local lo=math.max(0.015,calibrationThrottle*0.5,a.hover-3)
-  local hi=math.min(15,calibrationThrottle*2,a.hover+3)
+  local lo=math.max(0.015,calibrationThrottle*0.5,a.hover-0.6)
+  local hi=math.min(15,calibrationThrottle*2,a.hover+0.6)
   local base=a.hover/math.max(0.9,math.cos(tilt))
-  local raw=base+1.6*errorV+a.integral
+  local raw=base+0.22*errorV+a.integral
   -- Conditional integration prevents windup at either throttle boundary.
   if (raw>=lo and raw<=hi) or (raw<lo and errorV>0) or (raw>hi and errorV<0) then
-    a.integral=clamp(a.integral+0.5*errorV*dt,-2,2)
+    a.integral=clamp(a.integral+0.025*errorV*dt,-0.3,0.3)
   end
-  raw=base+1.6*errorV+a.integral
-  local output=clamp(raw,lo,hi)
-  a.saturated=raw<lo or raw>hi
+  raw=base+0.22*errorV+a.integral
+  -- Limit normal automatic changes to 2 percentage points per second.
+  -- Emergency stop bypasses this limiter and still goes directly to zero.
+  local previous=a.output or a.hover
+  local output=clamp(clamp(raw,lo,hi),previous-0.3*dt,previous+0.3*dt)
+  a.output=output
+  a.saturated=raw<lo or raw>hi or math.abs(output-clamp(raw,lo,hi))>1e-9
   return output
 end
 function M.validateRecord(r,id,mass)
@@ -560,7 +575,7 @@ local function tick()
 end
 local function draw()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.2 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.3 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
@@ -681,7 +696,7 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
-  startLog(); trace("START","v0.5.2; engine fields are acknowledged commands, not measured force")
+  startLog(); trace("START","v0.5.3; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then
