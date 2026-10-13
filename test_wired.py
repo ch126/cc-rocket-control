@@ -193,6 +193,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
         elif event=='slow_output': g.frame.outputLatency=a
         elif event=='lift': y+=a; vy=0; airborne=True
         elif event=='kick': ax+=a; az+=b
+        elif event=='spin': wx+=a; wz+=b
         elif event=='fall': vy=a
         elif event=='drift': vx+=a; vz+=b
         elif event=='position': px=a; pz=b

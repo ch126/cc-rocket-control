@@ -1,4 +1,4 @@
--- v0.5.0 experimental damped attitude + position hold + return above launch pad.
+-- v0.5.1 experimental attitude recovery + position hold + return above pad.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -180,6 +180,7 @@ local desired={throttle=0,x=0,y=0,epoch=0,revision=0}
 local pad,nav=nil,nil
 local lastPosition,filteredHorizontal=nil,nil
 local attitude={i1=0,i2=0,u=0,v=0}
+local recovery=nil
 local function resetAttitude() attitude={i1=0,i2=0,u=0,v=0} end
 local function cancelAltitude()
   altitude,nav=nil,nil; hoverReadySince,readyThrottle=nil,nil
@@ -206,6 +207,7 @@ local function stop(reason)
   cancelAltitude()
   armed,throttle,pitch,yaw=false,0,0,0
   mode,cal="MANUAL",nil
+  recovery=nil
   resetAttitude()
   message=reason or "Stopped."
   epoch=epoch+1; apply()
@@ -417,6 +419,14 @@ local function calibrationTick(t)
   message="Calibrated. Thrust unchanged. H enables HOLD."
   trySave()
 end
+local function beginRecovery(t)
+  -- Freeze the current thrust, discard navigation/height integrators. Trying to
+  -- maintain altitude with a large tilt can amplify lateral acceleration.
+  cancelAltitude()
+  mode="RECOVER"
+  recovery={deadline=t.time+30}
+  message="Recovering upright; thrust held. No altitude hold."
+end
 local function tick()
   telemetry=readTelemetry()
   local t=telemetry
@@ -429,8 +439,19 @@ local function tick()
   if mode~="MANUAL" then
     assert(t.dt and t.dt>=0.025 and t.dt<=0.35+1e-6,
       ("Sample dt=%s; allowed 0.025-0.350s"):format(t.dt and ("%.3fs"):format(t.dt) or "missing"))
-    assert(t.tilt<math.rad(25),"Tilt exceeded 25 degrees; test stopped")
+    assert(t.tilt<math.rad(70),"Outside recovery envelope: tilt >=70deg; stopped")
     assert(norm(t.w)<1.5,"Rotation too fast; test stopped")
+  end
+  if mode=="HOLD" and t.tilt>=math.rad(15) then beginRecovery(t) end
+  if mode=="RECOVER" then
+    assert(t.time<=recovery.deadline,"Recovery timeout >30s; stopped")
+    if t.tilt<math.rad(6) and norm(t.w)<0.08 then
+      recovery.settledSince=recovery.settledSince or t.time
+      if t.time-recovery.settledSince>=2 then
+        recovery=nil; resetAttitude(); mode="HOLD"
+        message="Upright recovered. Adjust hover, then V/B manually."
+      end
+    else recovery.settledSince=nil end
   end
   if mode=="HOLD" and not altitude and math.abs(t.vy)<0.4 and t.tilt<math.rad(8) then
     if readyThrottle~=throttle or not hoverReadySince then hoverReadySince=t.time; readyThrottle=throttle end
@@ -438,7 +459,6 @@ local function tick()
   if altitude then
     if mode~="HOLD" then cancelAltitude()
     else
-      assert(t.tilt<math.rad(15),"Altitude test tilt >15deg")
       assert(math.abs(t.rawVy)<4,"Vertical speed >4 blocks/s; test stopped")
       throttle=M.heightStep(altitude,t.y,t.vy,t.dt,t.tilt,calThrottle)
     end
@@ -460,16 +480,22 @@ local function tick()
     end
   end
   if mode=="CALIBRATE" then calibrationTick(t)
-  elseif mode=="HOLD" then
+  elseif mode=="HOLD" or mode=="RECOVER" then
     local a,b=rates(t)
     local e1,e2=M.error(t.q,basis,targetUp)
+    if mode=="RECOVER" then
+      -- Cap the attitude-error demand to brake rotation before approaching UP.
+      local length=math.sqrt(e1*e1+e2*e2)
+      local limit=math.rad(20)
+      if length>limit then e1,e2=e1*limit/length,e2*limit/length end
+    end
     pitch,yaw=M.command(matrix,e1,e2,a,b,throttle/calThrottle,attitude,t.dt)
   end
   apply()
 end
 local function draw()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.0 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.1 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
@@ -522,7 +548,7 @@ local function handleKey(k)
     matrix,calThrottle,calMass=nil,nil,nil
     message="UP set. Next: manual test, then K calibration."
   elseif armed then
-    if k==keys.c then cancelAltitude(); resetAttitude(); mode,cal,pitch,yaw="MANUAL",nil,0,0; message="Manual; thrust unchanged."
+    if k==keys.c then cancelAltitude(); recovery=nil; mode,cal,pitch,yaw="MANUAL",nil,0,0; message="Manual; thrust unchanged."
     elseif mode=="CALIBRATE" then message="Calibrating. C cancels; SPACE stops."
     elseif k==keys.b then
       if nav and nav.returning then
@@ -558,10 +584,11 @@ local function handleKey(k)
         end
       else message="Enable V height hold before N descent." end
     elseif k==keys.h then
-      if mode=="HOLD" then cancelAltitude(); mode,pitch,yaw="MANUAL",0,0; message="Manual; thrust unchanged."
-      elseif matrix and telemetry and os.clock()-telemetry.time<=0.25 and telemetry.tilt<math.rad(10) and throttle>0 and throttle/calThrottle>=0.5 and throttle/calThrottle<=2 then
-        resetAttitude(); mode="HOLD"; message="Damped upright hold. V adds position + height hold."
-      else message="Need calibration and thrust within 0.5-2x calibration." end
+      if mode=="HOLD" or mode=="RECOVER" then cancelAltitude(); recovery=nil; mode,pitch,yaw="MANUAL",0,0; message="Manual; thrust unchanged."
+      elseif matrix and telemetry and os.clock()-telemetry.time<=0.25 and telemetry.tilt<math.rad(70) and norm(telemetry.w)<1.5 and throttle>0 and throttle/calThrottle>=0.5 and throttle/calThrottle<=2 then
+        if telemetry.tilt>=math.rad(15) then beginRecovery(telemetry)
+        else resetAttitude(); mode="HOLD"; message="Damped upright hold. V adds position + height hold." end
+      else message="Need calibration, tilt<70, thrust 0.5-2x cal." end
     elseif k==keys.k then
       if mode=="MANUAL" and basis and telemetry and os.clock()-telemetry.time<=0.25 and throttle>0 and telemetry.tilt and telemetry.tilt<math.rad(5) and norm(telemetry.w)<0.05 then
         matrix,calThrottle,calMass=nil,nil,nil
@@ -573,8 +600,8 @@ local function handleKey(k)
       local step=(k==keys.t or k==keys.g) and 0.015 or 0.15
       throttle=clamp(throttle+((k==keys.r or k==keys.t) and step or -step),0,15)
       if throttle<1e-9 then throttle=0; epoch=epoch+1 end
-      if mode=="HOLD" and (throttle==0 or throttle/calThrottle<0.5 or throttle/calThrottle>2) then
-        mode,pitch,yaw="MANUAL",0,0; message="Outside calibrated thrust range; manual."
+      if (mode=="HOLD" or mode=="RECOVER") and (throttle==0 or throttle/calThrottle<0.5 or throttle/calThrottle>2) then
+        recovery=nil; mode,pitch,yaw="MANUAL",0,0; message="Outside calibrated thrust range; manual."
       end
     elseif mode=="MANUAL" then
       if k==keys.w then pitch=clamp(pitch+1,-3,3)
