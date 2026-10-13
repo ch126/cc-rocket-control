@@ -23,7 +23,7 @@ _runtimes=[]
 def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
              fail_method=None, blocked=False, reverse=False, gain=.05, hover=5,
              initial_throttle=0, cap=6666666.666667, smoothing=True,
-             source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05):
+             source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False):
     lua=LuaRuntime(unpack_returned_tuples=True)
     _runtimes.append(lua)
     lua.execute('collectgarbage("stop")')
@@ -37,6 +37,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
     g.initialThrottle=initial_throttle
     g.absent=missing
     g.failMethod=fail_method
+    g.logFailure=log_failure
     def plain(v):
         if not hasattr(v,'items'): return v
         d={k:plain(x) for k,x in v.items()}
@@ -131,7 +132,11 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
         delete=function(p) disk[p]=nil end,
         move=function(a,b) assert(disk[a] and not disk[b]); disk[b]=disk[a]; disk[a]=nil end,
         open=function(p,m)
-          if m=='w' then disk[p]=''; return {write=function(s) disk[p]=disk[p]..s end,close=function() end} end
+          if logFailure and string.find(p,'rocket-flight',1,true) then return nil,'DISK FAILURE' end
+          if m=='w' or m=='a' then
+            if m=='w' or not disk[p] then disk[p]='' end
+            return {write=function(s) disk[p]=disk[p]..s end,close=function() end}
+          end
           return {readAll=function() return disk[p] end,close=function() end}
         end}
       controller=coroutine.create(function() outcome=table.pack(pcall(assert(load(source)))) end)

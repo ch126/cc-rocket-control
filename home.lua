@@ -1,4 +1,4 @@
--- v0.5.1 experimental attitude recovery + position hold + return above pad.
+-- v0.5.2 bounded timing tolerance and local diagnostic flight log.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -181,6 +181,57 @@ local pad,nav=nil,nil
 local lastPosition,filteredHorizontal=nil,nil
 local attitude={i1=0,i2=0,u=0,v=0}
 local recovery=nil
+local lateSamples={}
+local timingLate=false
+local flightLog={queue={},status="OFF",rows=0,dropped=0,lastSample=-math.huge}
+local function csv(value)
+  if value==nil then return '""' end
+  return '"'..tostring(value):gsub('"','""'):gsub('[\r\n]',' ')..'"'
+end
+local function trace(kind,detail)
+  if flightLog.status~="ON" then return end
+  if #flightLog.queue>=200 then flightLog.dropped=flightLog.dropped+1; return end
+  local t=telemetry or {}; local p=t.position or {}; local v=t.horizontal or {}
+  local q=t.q or {}; local w=t.w or {}
+  local values={kind,os.clock(),mode,armed and 1 or 0,throttle/15*100,pitch,yaw,
+    t.dt or "",p.x or "",t.y or "",p.z or "",v.x or "",t.vy or "",v.z or "",
+    t.tilt and math.deg(t.tilt) or "",w.x or "",w.y or "",w.z or "",
+    q.x or "",q.y or "",q.z or "",q.w or "",t.mass or "",
+    altitude and altitude.target or "",nav and nav.target.x or "",nav and nav.target.z or "",
+    flightLog.dropped,detail or ""}
+  for _,e in ipairs(engines) do
+    values[#values+1]=e.output; values[#values+1]=e.gate
+    values[#values+1]=os.clock()-e.lastAck
+    values[#values+1]=e.x; values[#values+1]=e.y
+  end
+  for i,value in ipairs(values) do values[i]=csv(value) end
+  flightLog.queue[#flightLog.queue+1]=table.concat(values,",").."\n"
+end
+local function startLog()
+  local ok,err=pcall(function()
+    local index=1
+    repeat flightLog.path=("/rocket-flight-%04d.csv"):format(index); index=index+1
+    until not fs.exists(flightLog.path) or index>10000
+    assert(not fs.exists(flightLog.path),"Log slots full")
+    local handle=assert(fs.open(flightLog.path,"w"))
+    local header="event,time_s,mode,armed,power_pct,vector_x_step,vector_y_step,dt_s,x,y,z,vx,vy,vz,tilt_deg,wx,wy,wz,qx,qy,qz,qw,mass,target_y,target_x,target_z,dropped,detail"
+    for i=0,4 do header=header..(",engine%d_base_command,engine%d_gate_command,engine%d_ack_age_s,engine%d_vector_x,engine%d_vector_y"):format(i,i,i,i,i) end
+    local written,writeError=pcall(handle.write,header.."\n"); handle.close(); assert(written,writeError)
+    flightLog.status="ON"
+  end)
+  if not ok then flightLog.status="ERR"; flightLog.error=tostring(err) end
+end
+local function flushLog()
+  if flightLog.status~="ON" or #flightLog.queue==0 then return end
+  local batch=flightLog.queue; flightLog.queue={}
+  local ok,err=pcall(function()
+    local handle=assert(fs.open(flightLog.path,"a"))
+    local written,writeError=pcall(handle.write,table.concat(batch)); handle.close(); assert(written,writeError)
+  end)
+  if not ok then flightLog.status="ERR"; flightLog.error=tostring(err); return end
+  flightLog.rows=flightLog.rows+#batch
+  if flightLog.rows>=20000 then flightLog.status="FULL" end
+end
 local function resetAttitude() attitude={i1=0,i2=0,u=0,v=0} end
 local function cancelAltitude()
   altitude,nav=nil,nil; hoverReadySince,readyThrottle=nil,nil
@@ -204,10 +255,12 @@ local function apply()
   end
 end
 local function stop(reason)
+  trace("STOP",reason)
   cancelAltitude()
   armed,throttle,pitch,yaw=false,0,0,0
   mode,cal="MANUAL",nil
   recovery=nil
+  lateSamples={}; timingLate=false
   resetAttitude()
   message=reason or "Stopped."
   epoch=epoch+1; apply()
@@ -437,15 +490,27 @@ local function tick()
     invalidate("Mass changed >5%. Recalibrate."); return
   end
   if mode~="MANUAL" then
-    assert(t.dt and t.dt>=0.025 and t.dt<=0.35+1e-6,
-      ("Sample dt=%s; allowed 0.025-0.350s"):format(t.dt and ("%.3fs"):format(t.dt) or "missing"))
+    assert(t.dt and t.dt>=0.025 and t.dt<=0.5+1e-6,
+      ("Sample dt=%s outside 0.025-0.500s; stopped, calibration retained"):format(t.dt and ("%.3fs"):format(t.dt) or "missing"))
     assert(t.tilt<math.rad(70),"Outside recovery envelope: tilt >=70deg; stopped")
     assert(norm(t.w)<1.5,"Rotation too fast; test stopped")
+  end
+  timingLate=t.dt and t.dt>0.35+1e-6 or false
+  if timingLate and mode~="MANUAL" then
+    trace("LATE_SAMPLE",t.dt)
+    if mode=="CALIBRATE" then stop("Calibration interrupted by lag; retry K."); return end
+    local recent={}
+    for _,time in ipairs(lateSamples) do if t.time-time<=5 then recent[#recent+1]=time end end
+    recent[#recent+1]=t.time; lateSamples=recent
+    if #recent>=3 then stop("Repeated lag: 3 late samples/5s; cal retained."); return end
+    hoverReadySince,readyThrottle=nil,nil
+    if recovery then recovery.settledSince=nil end
+    if nav then nav.arrivedSince,nav.arrived=nil,false end
   end
   if mode=="HOLD" and t.tilt>=math.rad(15) then beginRecovery(t) end
   if mode=="RECOVER" then
     assert(t.time<=recovery.deadline,"Recovery timeout >30s; stopped")
-    if t.tilt<math.rad(6) and norm(t.w)<0.08 then
+    if not timingLate and t.tilt<math.rad(6) and norm(t.w)<0.08 then
       recovery.settledSince=recovery.settledSince or t.time
       if t.time-recovery.settledSince>=2 then
         recovery=nil; resetAttitude(); mode="HOLD"
@@ -453,14 +518,14 @@ local function tick()
       end
     else recovery.settledSince=nil end
   end
-  if mode=="HOLD" and not altitude and math.abs(t.vy)<0.4 and t.tilt<math.rad(8) then
+  if not timingLate and mode=="HOLD" and not altitude and math.abs(t.vy)<0.4 and t.tilt<math.rad(8) then
     if readyThrottle~=throttle or not hoverReadySince then hoverReadySince=t.time; readyThrottle=throttle end
   elseif not altitude then hoverReadySince,readyThrottle=nil,nil end
   if altitude then
     if mode~="HOLD" then cancelAltitude()
     else
       assert(math.abs(t.rawVy)<4,"Vertical speed >4 blocks/s; test stopped")
-      throttle=M.heightStep(altitude,t.y,t.vy,t.dt,t.tilt,calThrottle)
+      if not timingLate then throttle=M.heightStep(altitude,t.y,t.vy,t.dt,t.tilt,calThrottle) end
     end
   end
   local targetUp=vec(0,1,0)
@@ -469,9 +534,9 @@ local function tick()
     elseif norm(t.rawHorizontal)>3 or (nav.returning and ((not nav.completed and t.time>nav.deadline) or not pad or t.y<pad.y+8)) then
       nav=nil; resetAttitude(); message="Position/return aborted; upright height hold."
     else
-      targetUp,nav.distance=M.navigation(nav.target,t.position,t.horizontal,nav.slope,t.dt)
+      targetUp,nav.distance=M.navigation(nav.target,t.position,t.horizontal,nav.slope,timingLate and 0 or t.dt)
       if nav.returning then
-        if nav.distance<1.5 and norm(t.horizontal)<0.2 then
+        if not timingLate and nav.distance<1.5 and norm(t.horizontal)<0.2 then
           nav.arrivedSince=nav.arrivedSince or t.time
           nav.arrived=t.time-nav.arrivedSince>=3
           if nav.arrived then nav.completed=true end
@@ -489,20 +554,20 @@ local function tick()
       local limit=math.rad(20)
       if length>limit then e1,e2=e1*limit/length,e2*limit/length end
     end
-    pitch,yaw=M.command(matrix,e1,e2,a,b,throttle/calThrottle,attitude,t.dt)
+    pitch,yaw=M.command(matrix,e1,e2,a,b,throttle/calThrottle,attitude,timingLate and 0 or t.dt)
   end
   apply()
 end
 local function draw()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.1 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.2 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
     print(("Y %.2f | vertical speed %+.2f"):format(telemetry.y,telemetry.vy))
     print(("Tilt %s | calibration %s"):format(telemetry.tilt and ("%.1f deg"):format(math.deg(telemetry.tilt)) or "unset",matrix and "OK" or "needed"))
   else print("Telemetry unavailable") end
-  print(("Sample dt: %s | status: slow refresh"):format(lastInterval and ("%.3fs"):format(lastInterval) or "warming up"))
+  print(("Sample %s | %s | log %s"):format(lastInterval and ("%.3fs"):format(lastInterval) or "warmup",timingLate and "LATE" or "OK",flightLog.status))
   print("U New UP+pad | J Set pad (disarmed)")
   print("E Arm | R/F +/-1% | T/G +/-0.1%")
   print(("W/S D/A trim: X%+d Y%+d | C reset"):format(pitch,yaw))
@@ -554,7 +619,7 @@ local function handleKey(k)
       if nav and nav.returning then
         nav={target=checked(telemetry.position),slope={x=0,z=0},returning=false}
         resetAttitude(); message="Return cancelled; hold current position."
-      elseif altitude and mode=="HOLD" and pad and telemetry and os.clock()-telemetry.time<=0.25 and telemetry.y>=pad.y+12 and telemetry.tilt<math.rad(8) and norm(telemetry.horizontal)<1 then
+      elseif not timingLate and altitude and mode=="HOLD" and pad and telemetry and os.clock()-telemetry.time<=0.25 and telemetry.y>=pad.y+12 and telemetry.tilt<math.rad(8) and norm(telemetry.horizontal)<1 then
         local distance=math.sqrt((pad.x-telemetry.position.x)^2+(pad.z-telemetry.position.z)^2)
         if distance<=64 then
           altitude.target=telemetry.y; altitude.descending=false
@@ -564,7 +629,7 @@ local function handleKey(k)
       else message="B needs V, pad, Y>=pad+12, speed<1, tilt<8." end
     elseif k==keys.v then
       if altitude then cancelAltitude(); message="Altitude off; current thrust retained."
-      elseif mode=="HOLD" and launchY and telemetry and telemetry.y>=launchY+2 and os.clock()-telemetry.time<=0.25 and hoverReadySince and telemetry.time-hoverReadySince>=2 and throttle>=0.15 and throttle<=14.85 and norm(telemetry.horizontal)<2 then
+      elseif not timingLate and mode=="HOLD" and launchY and telemetry and telemetry.y>=launchY+2 and os.clock()-telemetry.time<=0.25 and hoverReadySince and telemetry.time-hoverReadySince>=2 and throttle>=0.15 and throttle<=14.85 and norm(telemetry.horizontal)<2 then
         altitude={hover=throttle,target=telemetry.y,floor=telemetry.y,integral=0,descending=false}
         nav={target=checked(telemetry.position),slope={x=0,z=0},returning=false}
         resetAttitude(); message="Position + height captured. B: return; N: descend."
@@ -616,12 +681,16 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
+  startLog(); trace("START","v0.5.2; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then
-      invalidate(tostring(err)); telemetry=nil; lastQ,lastTime,lastY,filteredVy=nil,nil,nil,nil
+      stop(tostring(err)); telemetry=nil; lastQ,lastTime,lastY,filteredVy=nil,nil,nil,nil
       lastPosition,filteredHorizontal=nil,nil
       status=nil -- Re-bootstrap after an API error, with outputs already zero.
+    end
+    if os.clock()-flightLog.lastSample>=0.2 then
+      flightLog.lastSample=os.clock(); trace("SAMPLE",message)
     end
     if loadPending and telemetry then
       loadPending=false
@@ -643,7 +712,8 @@ local function main()
       elseif event=="key" and (not held or (repeats[k] and os.clock()-(lastPress[k] or -math.huge)>=0.12)) then
         lastPress[k]=os.clock()
         local keyOK,keyError=pcall(handleKey,k)
-        if not keyOK then invalidate(tostring(keyError)) end
+        if not keyOK then stop(tostring(keyError)) end
+        trace("KEY",k)
         if running then apply(); draw() end
       end
     end
@@ -671,13 +741,27 @@ local function main()
     end
   end
   -- Each coroutine gets every event: server-thread API waits cannot eat keys.
-  local tasks={inputLoop,sampleLoop,watchdog}
+  local function logLoop()
+    local due=0
+    while running do
+      -- Reuse existing timer events; do not add scheduling load to the sampler.
+      os.pullEventRaw()
+      if os.clock()>=due then flushLog(); due=os.clock()+0.5 end
+    end
+  end
+  local tasks={inputLoop,sampleLoop,watchdog,logLoop}
   for _,e in ipairs(engines) do tasks[#tasks+1]=function() writer(e) end end
   draw(); parallel.waitForAny(table.unpack(tasks))
 end
 local ok,err=pcall(main)
 stop("Exiting; clearing all five engines.")
 local errors=clearEngines()
+if #errors==0 then
+  for _,e in ipairs(engines) do e.output,e.gate,e.x,e.y,e.lastAck=0,0,0,0,os.clock() end
+end
+trace("EXIT",#errors==0 and "Five engines zero" or table.concat(errors,"; ")); flushLog()
 term.clear(); term.setCursorPos(1,1)
 print(#errors==0 and "Stopped. Five engines zero; override kept at zero." or "CLEAR FAILED: "..table.concat(errors,"; "))
+print("Flight log: "..(flightLog.path or "unavailable").." ["..flightLog.status.."]")
+if flightLog.error then print("Log error: "..flightLog.error) end
 if not ok then error(err,0) end
