@@ -1,4 +1,4 @@
--- v0.5.3 fractional-demand pulse averaging and slower height control.
+-- v0.5.4 dashboard, explicit pad diagnostics and bounded flight logs.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -22,6 +22,10 @@ local function unit(a) local n=norm(a); assert(n>1e-9,"Zero vector"); return mul
 local function checked(v)
   assert(type(v)=="table" and finite(v.x) and finite(v.y) and finite(v.z),"Invalid vector")
   return vec(v.x,v.y,v.z)
+end
+function M.padDistance(pad,position)
+  checked(pad); checked(position)
+  return math.sqrt((pad.x-position.x)^2+(pad.z-position.z)^2)
 end
 function M.quaternion(q)
   assert(type(q)=="table","Missing orientation")
@@ -193,12 +197,25 @@ local ioFault=nil
 local epoch,revision=0,0
 local desired={throttle=0,x=0,y=0,epoch=0,revision=0}
 local pad,nav=nil,nil
+local padCapturedAt=nil
+local infoPage=false
+local buttons={}
 local lastPosition,filteredHorizontal=nil,nil
 local attitude={i1=0,i2=0,u=0,v=0}
 local recovery=nil
 local lateSamples={}
 local timingLate=false
-local flightLog={queue={},status="OFF",rows=0,dropped=0,lastSample=-math.huge}
+local LOG_RESERVE,LOG_LIMIT=65536,131072
+local flightLog={queue={},status="OFF",rows=0,bytes=0,dropped=0,lastSample=-math.huge}
+local function logSpace(bytes)
+  if not fs.getFreeSpace then return true end
+  local free=fs.getFreeSpace("/")
+  if type(free)=="number" and free<LOG_RESERVE+bytes then
+    flightLog.status="FULL"; flightLog.error="Low disk space; archive logs. No files deleted."
+    return false
+  end
+  return true
+end
 local function csv(value)
   if value==nil then return '""' end
   return '"'..tostring(value):gsub('"','""'):gsub('[\r\n]',' ')..'"'
@@ -219,19 +236,27 @@ local function trace(kind,detail)
     values[#values+1]=os.clock()-e.lastAck
     values[#values+1]=e.x; values[#values+1]=e.y
   end
+  values[#values+1]=pad and pad.x or ""
+  values[#values+1]=pad and pad.y or ""
+  values[#values+1]=pad and pad.z or ""
+  values[#values+1]=pad and t.position and M.padDistance(pad,t.position) or ""
+  values[#values+1]=padCapturedAt or ""
   for i,value in ipairs(values) do values[i]=csv(value) end
   flightLog.queue[#flightLog.queue+1]=table.concat(values,",").."\n"
 end
 local function startLog()
   local ok,err=pcall(function()
+    if not logSpace(2048) then return end
     local index=1
     repeat flightLog.path=("/rocket-flight-%04d.csv"):format(index); index=index+1
     until not fs.exists(flightLog.path) or index>10000
     assert(not fs.exists(flightLog.path),"Log slots full")
-    local handle=assert(fs.open(flightLog.path,"w"))
+    local handle,openError=fs.open(flightLog.path,"w"); assert(handle,openError)
     local header="event,time_s,mode,armed,power_pct,vector_x_step,vector_y_step,dt_s,x,y,z,vx,vy,vz,tilt_deg,wx,wy,wz,qx,qy,qz,qw,mass,target_y,target_x,target_z,dropped,detail"
     for i=0,4 do header=header..(",engine%d_base_command,engine%d_gate_command,engine%d_ack_age_s,engine%d_vector_x,engine%d_vector_y"):format(i,i,i,i,i) end
+    header=header..",pad_x,pad_y,pad_z,pad_horizontal_distance,pad_captured_at_s"
     local written,writeError=pcall(handle.write,header.."\n"); handle.close(); assert(written,writeError)
+    flightLog.bytes=#header+1
     flightLog.status="ON"
   end)
   if not ok then flightLog.status="ERR"; flightLog.error=tostring(err) end
@@ -240,8 +265,15 @@ local function flushLog()
   if flightLog.status~="ON" or #flightLog.queue==0 then return end
   local batch=flightLog.queue; flightLog.queue={}
   local ok,err=pcall(function()
-    local handle=assert(fs.open(flightLog.path,"a"))
-    local written,writeError=pcall(handle.write,table.concat(batch)); handle.close(); assert(written,writeError)
+    local content=table.concat(batch)
+    if flightLog.bytes+#content>LOG_LIMIT then
+      flightLog.status="FULL"; flightLog.error="Session log reached 128 KiB; flight continues."
+      return
+    end
+    if not logSpace(#content) then return end
+    local handle,openError=fs.open(flightLog.path,"a"); assert(handle,openError)
+    local written,writeError=pcall(handle.write,content); handle.close(); assert(written,writeError)
+    flightLog.bytes=flightLog.bytes+#content
   end)
   if not ok then flightLog.status="ERR"; flightLog.error=tostring(err); return end
   flightLog.rows=flightLog.rows+#batch
@@ -390,6 +422,7 @@ local function loadRecord()
   basis,matrix,referenceId,calMass,calThrottle=b,m,r.id,r.mass,r.throttle
   telemetry.e1,telemetry.e2,telemetry.tilt=M.error(telemetry.q,basis)
   launchY,pad=nil,nil -- Never reuse a previous flight's world-height or pad reference.
+  padCapturedAt=nil
   recordStatus="Loaded; verify craft unchanged"
   message="Calibration loaded. J: ground reference. E: arm at zero."
 end
@@ -499,7 +532,7 @@ local function tick()
   telemetry=readTelemetry()
   local t=telemetry
   if basis and t.id~=referenceId then
-    basis,pad,launchY=nil,nil,nil; invalidate("Craft changed. Set UP and calibrate again."); return
+    basis,pad,launchY,padCapturedAt=nil,nil,nil,nil; invalidate("Craft changed. Set UP and calibrate again."); return
   end
   if matrix and math.abs(t.mass/calMass-1)>0.05 then
     invalidate("Mass changed >5%. Recalibrate."); return
@@ -573,9 +606,9 @@ local function tick()
   end
   apply()
 end
-local function draw()
+local function drawText()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.3 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.4 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
@@ -594,11 +627,72 @@ local function draw()
     print(("Target Y %.2f | %s"):format(altitude.target,altitude.saturated and "THRUST LIMIT" or "height control"))
   else print("P Save / L Load (disarmed)") end
   print("SPACE stop | Q exit | no ground sensing")
-  print(pad and (nav and ("Pad set | target distance %.1f"):format(nav.distance or 0) or "Pad set | return needs Y >= pad+12") or "Pad NOT SET: J at launch position")
+  if pad and telemetry then
+    print(("Pad distance %.1f | height above pad %+.1f"):format(M.padDistance(pad,telemetry.position),telemetry.y-pad.y))
+    print(("Pad XYZ %.2f %.2f %.2f"):format(pad.x,pad.y,pad.z))
+    print(("Now XYZ %.2f %.2f %.2f"):format(telemetry.position.x,telemetry.y,telemetry.position.z))
+  else print("Pad NOT SET: J at launch position") end
+  if nav then print(("Navigation target distance %.1f"):format(nav.distance or 0)) end
+  if flightLog.error then print("Log: "..flightLog.error) end
   print(recordStatus)
   print(message)
 end
+-- Native terminal buttons use the same key handler and safety checks as keys.
+-- No external libraries, monitor or mouse is required; keyboard remains active.
+local function draw()
+  buttons={}
+  if not term.getSize or not term.write then return drawText() end
+  local width,height=term.getSize()
+  local function colour(fg,bg)
+    if term.setTextColor then term.setTextColor(fg or 1) end
+    if term.setBackgroundColor then term.setBackgroundColor(bg or 32768) end
+  end
+  local function line(y,s,fg,bg)
+    if y>height then return end
+    colour(fg,bg); term.setCursorPos(1,y)
+    term.write((s..string.rep(" ",width)):sub(1,width))
+  end
+  colour(); term.clear()
+  if width<51 or height<19 then
+    line(1,"ROCKET: resize terminal to at least 51 x 19")
+    line(2,(armed and "ARMED " or "DISARMED ")..mode)
+    line(3,"SPACE: engine stop | Q: exit | keys still work")
+    line(4,message); return
+  end
+  line(1," ROCKET v0.5.4 | 5 x 733 kN | I: INFO",1,2048)
+  local state=(armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or "")
+  line(2,state,armed and 32 or 256)
+  local filled=math.floor(throttle/15*16+0.5)
+  line(3,("Power %5.1f%% [%s%s] %s"):format(throttle/15*100,string.rep("#",filled),string.rep("-",16-filled),altitude and "AUTO" or "MANUAL"),16)
+  local t=telemetry
+  line(4,t and ("Y %+.2f | Vy %+.2f blocks/s"):format(t.y,t.vy) or "Telemetry unavailable")
+  line(5,t and ("Tilt %s deg | horizontal speed %.2f"):format(t.tilt and ("%.1f"):format(math.deg(t.tilt)) or "?",norm(t.horizontal)) or "Waiting for telemetry")
+  line(6,("Sample %s %s | log %s | Cal %s"):format(lastInterval and ("%.3fs"):format(lastInterval) or "?",timingLate and "LATE" or "OK",flightLog.status,matrix and "OK" or "NEEDED"))
+  line(7,t and ("NOW X %.2f Y %.2f Z %.2f"):format(t.position.x,t.y,t.position.z) or "NOW --")
+  line(8,pad and ("PAD X %.2f Y %.2f Z %.2f"):format(pad.x,pad.y,pad.z) or "Pad NOT SET: J on launch pad, disarmed",pad and 1 or 16)
+  line(9,pad and t and ("PAD dist %.2f /64 | dY %+.2f /+12"):format(M.padDistance(pad,t.position),t.y-pad.y) or "PAD distance -- (not hover target)",512)
+  line(10,nav and ("%s target %.2f | Y %.2f %s"):format(nav.returning and "RETURN" or "HOVER",nav.distance or 0,altitude.target,altitude.saturated and "LIMIT" or "AUTO") or "H: upright only | V: automatic hover thrust")
+  local function button(x,y,label,key,bg)
+    colour(1,bg or 128); term.setCursorPos(x,y); term.write(label)
+    buttons[#buttons+1]={x=x,y=y,w=#label,key=key}
+  end
+  button(1,11,armed and " E OFF " or " E ARM ",keys.e,armed and 16384 or 8192)
+  button(10,11," H LEVEL ",keys.h); button(21,11," V HOVER ",keys.v); button(32,11," B RETURN ",keys.b)
+  button(1,12," F -1% ",keys.f); button(10,12," G -0.1% ",keys.g)
+  button(21,12," T +0.1% ",keys.t); button(32,12," R +1% ",keys.r)
+  button(1,13," C MAN ",keys.c); button(10,13," N DOWN ",keys.n)
+  button(21,13," J PAD ",keys.j); button(32,13," I INFO ",keys.i)
+  button(1,14," U UP ",keys.u); button(10,14," K CAL ",keys.k)
+  button(21,14," P SAVE ",keys.p); button(32,14," L LOAD ",keys.l)
+  button(1,15," SPACE STOP ENGINES ",keys.space,16384); button(32,15," Q EXIT ",keys.q,16384)
+  line(16,infoPage and ("Pad captured at: "..(padCapturedAt and ("%.1fs"):format(padCapturedAt) or "not set")) or "W/S D/A: trim | no terrain / auto ignition",256)
+  line(17,infoPage and (flightLog.error or recordStatus) or ("Log "..(flightLog.path or "not created").." | I: details"),flightLog.error and 16 or 256)
+  -- The bottom two rows are reserved for messages, never scrolled off screen.
+  line(18,message:sub(1,width),16); line(19,message:sub(width+1,2*width),16)
+  colour()
+end
 local function handleKey(k)
+  if k==keys.i then infoPage=not infoPage; return end
   if k==keys.q then stop("Exiting."); running=false; return end
   if k==keys.space then stop("Emergency stop."); return end
   if k==keys.e then
@@ -620,11 +714,14 @@ local function handleKey(k)
     local t=telemetry
     assert(t and t.dt and t.tilt and t.tilt<math.rad(5) and os.clock()-t.time<=0.25 and math.abs(t.vy)<0.2 and norm(t.w)<0.03,"J needs still upright craft at launch position")
     assert(norm(t.horizontal)<0.2,"Set pad only while horizontally still")
-    launchY,pad=t.y,checked(t.position); message="Pad XYZ captured; calibration retained."
+    launchY,pad=t.y,checked(t.position); padCapturedAt=t.time
+    trace("PAD_SET","J: launch reference captured")
+    message="Pad XYZ captured; calibration retained."
   elseif k==keys.u and not armed then
     local t=telemetry
     assert(t and os.clock()-t.time<=0.25 and t.dt and t.dt>0 and t.velocityAge<2 and norm(t.w)<0.03 and norm(t.velocity)<0.2,"Set UP only while still with fresh telemetry")
     basis=M.basis(t.q); referenceId=t.id; launchY,pad=t.y,checked(t.position)
+    padCapturedAt=t.time; trace("PAD_SET","U: launch reference captured")
     matrix,calThrottle,calMass=nil,nil,nil
     message="UP set. Next: manual test, then K calibration."
   elseif armed then
@@ -635,13 +732,21 @@ local function handleKey(k)
         nav={target=checked(telemetry.position),slope={x=0,z=0},returning=false}
         resetAttitude(); message="Return cancelled; hold current position."
       elseif not timingLate and altitude and mode=="HOLD" and pad and telemetry and os.clock()-telemetry.time<=0.25 and telemetry.y>=pad.y+12 and telemetry.tilt<math.rad(8) and norm(telemetry.horizontal)<1 then
-        local distance=math.sqrt((pad.x-telemetry.position.x)^2+(pad.z-telemetry.position.z)^2)
+        local distance=M.padDistance(pad,telemetry.position)
         if distance<=64 then
           altitude.target=telemetry.y; altitude.descending=false
           nav={target=checked(pad),slope={x=0,z=0},returning=true,deadline=telemetry.time+180}
           resetAttitude(); message="Return above pad at this height. No obstacle avoidance."
-        else message="Return range limited to 64 blocks." end
-      else message="B needs V, pad, Y>=pad+12, speed<1, tilt<8." end
+        else message=("B blocked: PAD distance %.2f >64. Check PAD/NOW XYZ; hover distance is different."):format(distance) end
+      else
+        local t=telemetry
+        if not pad then message="B blocked: pad unset. J on launch pad, disarmed."
+        elseif not altitude or mode~="HOLD" then message="B blocked: enable V first; need HOLD ALT POS."
+        elseif timingLate or not t or os.clock()-t.time>0.25 then message="B blocked: wait for fresh, on-time telemetry."
+        elseif t.y<pad.y+12 then message=("B blocked: height above PAD %.2f <12 blocks."):format(t.y-pad.y)
+        elseif t.tilt>=math.rad(8) then message="B blocked: tilt must be <8 degrees."
+        else message=("B blocked: horizontal speed %.2f must be <1."):format(norm(t.horizontal)) end
+      end
     elseif k==keys.v then
       if altitude then cancelAltitude(); message="Altitude off; current thrust retained."
       elseif not timingLate and mode=="HOLD" and launchY and telemetry and telemetry.y>=launchY+2 and os.clock()-telemetry.time<=0.25 and hoverReadySince and telemetry.time-hoverReadySince>=2 and throttle>=0.15 and throttle<=14.85 and norm(telemetry.horizontal)<2 then
@@ -696,7 +801,7 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
-  startLog(); trace("START","v0.5.3; engine fields are acknowledged commands, not measured force")
+  startLog(); trace("START","v0.5.4; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then
@@ -719,8 +824,16 @@ local function main()
     local repeats,lastPress={},{}
     for _,k in ipairs({keys.r,keys.f,keys.t,keys.g,keys.w,keys.s,keys.d,keys.a}) do repeats[k]=true end
     while running do
-      local event,k,held=os.pullEventRaw()
+      local event,k,held,mouseY=os.pullEventRaw()
+      if event=="mouse_click" and k==1 then
+        for _,b in ipairs(buttons) do
+          if mouseY==b.y and held>=b.x and held<b.x+b.w then
+            event,k,held="key",b.key,false; break
+          end
+        end
+      end
       if event=="terminate" then stop("Terminated."); running=false; return
+      elseif event=="term_resize" then draw()
       elseif event=="peripheral_detach" then
         for _,name in ipairs(ENGINE_NAMES) do if k==name or k=="bottom" then failIO("Disconnected: "..k); break end end
       elseif event=="key_up" then lastPress[k]=nil
@@ -729,6 +842,7 @@ local function main()
         local keyOK,keyError=pcall(handleKey,k)
         if not keyOK then stop(tostring(keyError)) end
         trace("KEY",k)
+        trace("ACTION",message)
         if running then apply(); draw() end
       end
     end

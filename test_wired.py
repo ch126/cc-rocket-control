@@ -24,7 +24,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
              fail_method=None, blocked=False, reverse=False, gain=.05, hover=5,
              initial_throttle=0, cap=6666666.666667, smoothing=True,
              source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False,
-             vertical_gain=1):
+             vertical_gain=1, gui=False, disk_capacity=None, screen_size=(51,19)):
     lua=LuaRuntime(unpack_returned_tuples=True)
     _runtimes.append(lua)
     lua.execute('collectgarbage("stop")')
@@ -39,6 +39,8 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
     g.absent=missing
     g.failMethod=fail_method
     g.logFailure=log_failure
+    g.gui=gui; g.diskCapacity=disk_capacity
+    g.screenWidth,g.screenHeight=screen_size
     def plain(v):
         if not hasattr(v,'items'): return v
         d={k:plain(x) for k,x in v.items()}
@@ -54,7 +56,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
       now=0; nextId=0; lines={}; motors={}; redstoneOutputs={top=9}
       frame={x=0,z=0,vx=0,vz=0,y=50,vy=0,qx=0,qz=0,qw=1,mass=100,id='test-craft'}
       keys={e=1,r=2,f=3,w=4,s=5,d=6,a=7,c=8,space=9,q=10,u=11,k=12,h=13,
-        v=14,n=15,j=16,p=17,l=18,t=19,g=20,b=21}
+        v=14,n=15,j=16,p=17,l=18,t=19,g=20,b=21,i=22}
       os={clock=function() return now end,
         pullEventRaw=function(filter) return coroutine.yield(filter) end,
         startTimer=function(dt) nextId=nextId+1; enqueue(now+dt,'timer',nextId); return nextId end}
@@ -89,6 +91,21 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
       end
       print=function(s) lines[#lines+1]=tostring(s or '') end
       term={clear=function() lines={} end,setCursorPos=function() end}
+      if gui then
+        local cx,cy=1,1
+        term.getSize=function() return screenWidth,screenHeight end
+        term.setCursorPos=function(x,y)
+          assert(x>=1 and x<=screenWidth and y>=1 and y<=screenHeight,'cursor out of bounds')
+          cx,cy=x,y
+        end
+        term.setTextColor=function() end; term.setBackgroundColor=function() end
+        term.write=function(s)
+          assert(cx+#s-1<=screenWidth,'text overflows screen')
+          local row=lines[cy] or string.rep(' ',screenWidth)
+          lines[cy]=row:sub(1,cx-1)..s..row:sub(cx+#s)
+          cx=cx+#s
+        end
+      end
       redstone={setAnalogOutput=function(s,v) assert(v==0,'wired must not drive redstone'); redstoneOutputs[s]=v end}
       sublevel={
         isInPlotGrid=function() return task(function() return not frame.detached end) end,
@@ -130,13 +147,22 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
       peripheral.call=function(n,m,...) return assert(peripheral.wrap(n),'MISSING '..n)[m](...) end
       textutils={serialize=function(v) return encode(v) end,unserialize=function(s) return decode(s) end}
       fs={exists=function(p) return disk[p]~=nil end,getSize=function(p) return #disk[p] end,
+        getFreeSpace=function()
+          if not diskCapacity then return 'unlimited' end
+          local used=0; for _,s in pairs(disk) do used=used+#s end
+          return diskCapacity-used
+        end,
         delete=function(p) disk[p]=nil end,
         move=function(a,b) assert(disk[a] and not disk[b]); disk[b]=disk[a]; disk[a]=nil end,
         open=function(p,m)
           if logFailure and string.find(p,'rocket-flight',1,true) then return nil,'DISK FAILURE' end
           if m=='w' or m=='a' then
             if m=='w' or not disk[p] then disk[p]='' end
-            return {write=function(s) disk[p]=disk[p]..s end,close=function() end}
+            return {write=function(s)
+              local free=fs.getFreeSpace('/')
+              assert(type(free)~='number' or free>=#s,'Out of space')
+              disk[p]=disk[p]..s
+            end,close=function() end}
           end
           return {readAll=function() return disk[p] end,close=function() end}
         end}
@@ -203,7 +229,10 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
         elif event=='fall': vy=a
         elif event=='drift': vx+=a; vz+=b
         elif event=='position': px=a; pz=b
-        ok,*rest=as_tuple(g.resumeController(event,a,b))
+        if event=='click':
+            ok,*rest=as_tuple(g.resumeController('mouse_click',1,a,b))
+        else:
+            ok,*rest=as_tuple(g.resumeController(event,a,b))
         assert ok,rest
         history.append(dict(time=at,lines=' '.join(g.lines.values()),
             powers=[g.motors[n].gate/15*g.motors[n].output for n in NAMES],
