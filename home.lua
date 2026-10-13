@@ -1,4 +1,4 @@
--- v0.5.4 dashboard, explicit pad diagnostics and bounded flight logs.
+-- v0.5.4.1 explicit calibration-load and pad-capture diagnostics.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -413,7 +413,11 @@ local function loadRecord()
   local path=recordPath
   -- Backup is used only if promotion of a completed temporary file was interrupted.
   if not fs.exists(path) and fs.exists(path..".bak") then path=path..".bak" end
-  if not fs.exists(path) then recordStatus="No saved calibration"; return end
+  if not fs.exists(path) then
+    recordStatus="No saved calibration"
+    message="L: no calibration file on this computer. Restore it, or U then K for new calibration."
+    return
+  end
   assert(fs.getSize(path)<=16384,"Calibration file too large")
   local h,err=fs.open(path,"r"); assert(h,err)
   local data=h.readAll(); h.close()
@@ -608,7 +612,7 @@ local function tick()
 end
 local function drawText()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.4 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.4.1 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
@@ -659,7 +663,7 @@ local function draw()
     line(3,"SPACE: engine stop | Q: exit | keys still work")
     line(4,message); return
   end
-  line(1," ROCKET v0.5.4 | 5 x 733 kN | I: INFO",1,2048)
+  line(1," ROCKET v0.5.4.1 | 5 x 733 kN | I: INFO",1,2048)
   local state=(armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or "")
   line(2,state,armed and 32 or 256)
   local filled=math.floor(throttle/15*16+0.5)
@@ -685,7 +689,7 @@ local function draw()
   button(1,14," U UP ",keys.u); button(10,14," K CAL ",keys.k)
   button(21,14," P SAVE ",keys.p); button(32,14," L LOAD ",keys.l)
   button(1,15," SPACE STOP ENGINES ",keys.space,16384); button(32,15," Q EXIT ",keys.q,16384)
-  line(16,infoPage and ("Pad captured at: "..(padCapturedAt and ("%.1fs"):format(padCapturedAt) or "not set")) or "W/S D/A: trim | no terrain / auto ignition",256)
+  line(16,infoPage and recordStatus or "W/S D/A: trim | no terrain / auto ignition",256)
   line(17,infoPage and (flightLog.error or recordStatus) or ("Log "..(flightLog.path or "not created").." | I: details"),flightLog.error and 16 or 256)
   -- The bottom two rows are reserved for messages, never scrolled off screen.
   line(18,message:sub(1,width),16); line(19,message:sub(width+1,2*width),16)
@@ -704,16 +708,26 @@ local function handleKey(k)
     if armed then message="Armed at zero. Increase thrust manually." end
     return
   end
-  if not armed and k==keys.p then trySave(); return end
+  if not armed and k==keys.p then trySave(); message=recordStatus; return end
   if not armed and k==keys.l then
     local ok,err=pcall(loadRecord)
-    if not ok then recordStatus="LOAD REJECTED: "..tostring(err) end
+    if not ok then
+      recordStatus="LOAD REJECTED: "..tostring(err):gsub("^.-:%d+: ","")
+      message=recordStatus
+    end
     return
   end
-  if k==keys.j and not armed then
+  if k==keys.j then
     local t=telemetry
-    assert(t and t.dt and t.tilt and t.tilt<math.rad(5) and os.clock()-t.time<=0.25 and math.abs(t.vy)<0.2 and norm(t.w)<0.03,"J needs still upright craft at launch position")
-    assert(norm(t.horizontal)<0.2,"Set pad only while horizontally still")
+    if armed then message="J blocked: ARMED. Land/support craft, then E to disarm."; return end
+    if not basis then message="J blocked: UP reference missing (not a tilt fault). L to load, or U to set UP."; return end
+    if not t or not t.dt or not t.tilt or os.clock()-t.time>0.25 then
+      message="J blocked: wait for fresh telemetry and a tilt reading."; return
+    end
+    if t.tilt>=math.rad(5) then message=("J blocked: tilt %.2f deg; need <5. Verify saved UP."):format(math.deg(t.tilt)); return end
+    if math.abs(t.vy)>=0.2 then message=("J blocked: vertical speed %+.2f; need abs <0.2."):format(t.vy); return end
+    if norm(t.w)>=0.03 then message=("J blocked: rotating %.3f rad/s; need <0.030."):format(norm(t.w)); return end
+    if norm(t.horizontal)>=0.2 then message=("J blocked: horizontal speed %.2f; need <0.2."):format(norm(t.horizontal)); return end
     launchY,pad=t.y,checked(t.position); padCapturedAt=t.time
     trace("PAD_SET","J: launch reference captured")
     message="Pad XYZ captured; calibration retained."
@@ -801,7 +815,7 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
-  startLog(); trace("START","v0.5.4; engine fields are acknowledged commands, not measured force")
+  startLog(); trace("START","v0.5.4.1; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then
@@ -816,7 +830,10 @@ local function main()
       loadPending=false
       if not armed then
         local loaded,loadError=pcall(loadRecord)
-        if not loaded then recordStatus="LOAD REJECTED: "..tostring(loadError) end
+        if not loaded then
+          recordStatus="LOAD REJECTED: "..tostring(loadError):gsub("^.-:%d+: ","")
+          message=recordStatus
+        end
       end
     end
   end
