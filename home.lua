@@ -1,4 +1,4 @@
--- v0.5.4.1 explicit calibration-load and pad-capture diagnostics.
+-- v0.5.5 short calibration probes with measured-response braking.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
 -- IMPORTANT: this build quantizes setThrustNormalized into 15 steps internally.
@@ -487,39 +487,119 @@ local function invalidate(reason)
   matrix,calThrottle,calMass=nil,nil,nil
   stop(reason)
 end
-local stages={{0,0},{1,0},{0,0},{-1,0},{0,0},{0,1},{0,0},{0,-1},{0,0}}
 local function stageStart(t)
-  cal.start=t.time; cal.measureStart=nil
-  pitch,yaw=stages[cal.stage][1],stages[cal.stage][2]
+  cal.start=t.time; cal.phase="NEUTRAL"; pitch,yaw=0,0
 end
 local function calibrationTick(t)
   assert(t.tilt<math.rad(12),"Calibration tilt exceeded 12 degrees")
   assert(norm(t.w)<0.6,"Calibration rotation too fast")
   assert(math.abs(t.mass/cal.mass-1)<=0.05,"Mass changed during calibration")
-  -- Discard the first part of each step: CC scheduling + nozzle tween settling.
-  if not cal.measureStart then
-    if t.time-cal.start>=0.45 then cal.measureStart=t.time; cal.wa,cal.wb=rates(t) end
+  assert(t.time-cal.start<24,"Calibration timeout; no record saved")
+  local a,b=rates(t)
+  local function command(n)
+    if cal.axis==1 then pitch,yaw=n,0 else yaw=n end
+  end
+  if cal.phase=="NEUTRAL" then
+    if t.time-cal.start<0.6 then return end
+    assert(norm(t.w)<0.03,"Calibration needs still rotation before probe")
+    cal.axis=1; cal.columns={}; cal.phase="BEGIN"
+  end
+  if cal.phase=="BEGIN" then
+    cal.axisStart=t.time; cal.wa,cal.wb=a,b
+    cal.q,cal.area,cal.sumS,cal.sumSS,cal.sumA,cal.sumB,cal.sumSA,cal.sumSB,cal.n=0,0,0,0,0,0,0,0,0
+    cal.previousCommand=0; cal.balance=0; cal.settled=nil; cal.reverseSeen=false
+    cal.sumSquares=0
+    cal.firstQ,cal.firstArea,cal.previousFirst,cal.firstBalance=0,0,0,0
+    cal.phase="PROBE"; command(1); return
+  end
+  -- Model the installed nozzle's 20%-per-tick tween. Account for ~one tick
+  -- transport delay; rates from pose differences represent interval averages.
+  -- Regress angular rate against integrated nozzle input, NOT raw command/dt.
+  local dt=t.dt
+  local target=cal.axis==1 and pitch or yaw
+  local delay=math.min(0.05,dt)
+  local tau=-0.05/math.log(0.8)
+  local oldArea=cal.area
+  local function integrate(input,duration)
+    local decay=math.exp(-duration/tau)
+    cal.area=cal.area+input*duration+(cal.q-input)*tau*(1-decay)
+    cal.q=input+(cal.q-input)*decay
+  end
+  integrate(cal.previousCommand,delay); integrate(target,dt-delay)
+  cal.previousCommand=target
+  local s=(oldArea+cal.area)/2
+  local observedA,observedB=a,b
+  if cal.axis==2 then
+    local oldFirst=cal.firstArea
+    for _,part in ipairs({{cal.previousFirst,delay},{pitch,dt-delay}}) do
+      local input,duration=part[1],part[2]; local decay=math.exp(-duration/tau)
+      cal.firstArea=cal.firstArea+input*duration+(cal.firstQ-input)*tau*(1-decay)
+      cal.firstQ=input+(cal.firstQ-input)*decay
+    end
+    cal.previousFirst=pitch
+    local area=(oldFirst+cal.firstArea)/2
+    observedA,observedB=a-cal.columns[1][1]*area,b-cal.columns[1][2]*area
+  end
+  cal.n=cal.n+1; cal.sumS=cal.sumS+s; cal.sumSS=cal.sumSS+s*s
+  cal.sumA=cal.sumA+observedA; cal.sumB=cal.sumB+observedB
+  cal.sumSA=cal.sumSA+s*observedA; cal.sumSB=cal.sumSB+s*observedB
+  cal.sumSquares=cal.sumSquares+observedA*observedA+observedB*observedB
+  local variance=cal.sumSS-cal.sumS*cal.sumS/cal.n
+  local ca,cb
+  if cal.n>=3 and variance>0.0001 then
+    ca=(cal.sumSA-cal.sumS*cal.sumA/cal.n)/variance
+    cb=(cal.sumSB-cal.sumS*cal.sumB/cal.n)/variance
+  end
+  if cal.phase=="PROBE" then
+    local delta=math.sqrt((a-cal.wa)^2+(b-cal.wb)^2)
+    if t.time-cal.axisStart>=0.2 and (delta>=0.018 or t.time-cal.axisStart>=0.4) then
+      assert(delta>0.002,"Probe response too weak; check free craft/thrust")
+      local scale=math.max(math.abs(s),0.02)
+      cal.ca,cal.cb=(a-cal.wa)/scale,(b-cal.wb)/scale
+      cal.phase="BRAKE"; command(-1); cal.reverseSeen=true
+    end
     return
   end
-  if t.time-cal.start<0.9-1e-6 or t.time-cal.measureStart<0.25 then return end
-  local a,b=rates(t); local dt=t.time-cal.measureStart
-  cal.samples[cal.stage]={(a-cal.wa)/dt,(b-cal.wb)/dt}
-  cal.stage=cal.stage+1
-  if cal.stage<=#stages then stageStart(t); return end
-  local s=cal.samples
-  local columns={}
-  for i,indices in ipairs({{2,4},{6,8}}) do
-    local pos,neg=indices[1],indices[2]
-    -- Subtract the preceding neutral interval's drift. Compare both signs.
-    local p={s[pos][1]-s[pos-1][1],s[pos][2]-s[pos-1][2]}
-    local n={s[neg][1]-s[neg-1][1],s[neg][2]-s[neg-1][2]}
-    local pn,nn=math.sqrt(p[1]^2+p[2]^2),math.sqrt(n[1]^2+n[2]^2)
-    assert(pn>0.02 and nn>0.02,"Calibration response too weak")
-    assert((p[1]*n[1]+p[2]*n[2])/(pn*nn)<-0.5,"Opposite signals did not produce opposite rotation")
-    assert(pn/nn>0.25 and pn/nn<4,"Calibration response inconsistent")
-    columns[i]={(p[1]-n[1])/2,(p[2]-n[2])/2}
+  if ca and ca*cal.ca+cb*cal.cb>0 then cal.ca,cal.cb=ca,cb end
+  ca,cb=cal.ca,cal.cb
+  local strength=math.sqrt(ca*ca+cb*cb)
+  assert(strength>0.005 and strength<5,"Probe response outside calibration range")
+  -- Project UP error/rate along the measured response. Anticipate residual
+  -- nozzle force so braking starts before the rotation crosses zero.
+  local errorAlong=(t.e1*ca+t.e2*cb)/strength
+  local rateAlong=(a*ca+b*cb)/strength
+  local demand=(0.8*errorAlong-1.8*rateAlong)/strength-0.35*cal.q
+  if cal.axis==2 then
+    local c=cal.columns[1]; local det=c[1]*cb-ca*c[2]
+    assert(math.abs(det)>0.0001,"Calibration axes overlap")
+    local x,y=0.8*t.e1-1.8*a,0.8*t.e2-1.8*b
+    local first=(cb*x-ca*y)/det-0.35*cal.firstQ
+    demand=(-c[2]*x+c[1]*y)/det-0.35*cal.q
+    cal.firstBalance=clamp(cal.firstBalance+clamp(first,-1,1)*dt,-dt,dt)
+    pitch=math.floor(math.abs(cal.firstBalance/dt)+0.5)*(cal.firstBalance<0 and -1 or 1)
+    cal.firstBalance=cal.firstBalance-pitch*dt
   end
-  matrix=M.matrix(columns); calThrottle,calMass=throttle,t.mass
+  cal.balance=clamp(cal.balance+clamp(demand,-1,1)*dt,-dt,dt)
+  local pulse=math.floor(math.abs(cal.balance/dt)+0.5)*(cal.balance<0 and -1 or 1)
+  cal.balance=cal.balance-pulse*dt; command(pulse)
+  if math.abs(errorAlong)<math.rad(1) and norm(t.w)<0.012 and math.abs(cal.q)<0.3 then
+    -- Do not generate another minimum-size pulse when already almost still.
+    command(0); cal.balance=0
+    if cal.axis==2 and math.abs(cal.firstQ)<0.3 then pitch=0; cal.firstBalance=0 end
+  end
+  assert(t.time-cal.axisStart<10,"Calibration axis did not settle; no record saved")
+  if math.abs(errorAlong)<math.rad(1) and norm(t.w)<0.018 and math.abs(cal.q)<0.15 and t.time-cal.axisStart>1.2 then
+    cal.settled=cal.settled or t.time
+  else cal.settled=nil end
+  message=("CAL axis %d BRAKE/SETTLE | tilt %.1f | rate %.3f"):format(cal.axis,math.deg(t.tilt),norm(t.w))
+  if not cal.settled or t.time-cal.settled<0.45 then return end
+  assert(ca and variance>0.0005 and cal.reverseSeen,"Insufficient calibration excitation")
+  local observedVariance=cal.sumSquares-(cal.sumA*cal.sumA+cal.sumB*cal.sumB)/cal.n
+  local fit=(ca*ca+cb*cb)*variance/math.max(observedVariance,1e-12)
+  assert(fit>=0.75 and fit<=1.05,"Calibration response inconsistent; no record saved")
+  cal.columns[cal.axis]={ca,cb}; command(0)
+  if cal.axis==1 then cal.axis=2; cal.phase="BEGIN"; return end
+  matrix=M.matrix(cal.columns); calThrottle,calMass=throttle,t.mass
   mode,cal,pitch,yaw="MANUAL",nil,0,0
   message="Calibrated. Thrust unchanged. H enables HOLD."
   trySave()
@@ -612,7 +692,7 @@ local function tick()
 end
 local function drawText()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.5.4.1 HOME | 5 x 733 kN")
+  print("ROCKET v0.5.5 HOME | 5 x 733 kN")
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
   if telemetry then
@@ -623,7 +703,7 @@ local function drawText()
   print("U New UP+pad | J Set pad (disarmed)")
   print("E Arm | R/F +/-1% | T/G +/-0.1%")
   print(("W/S D/A trim: X%+d Y%+d | C reset"):format(pitch,yaw))
-  print("K Calibrate: ~9s pulses, thrust unchanged")
+  print("K Short probe + brake; thrust unchanged")
   print("H Upright | V Position+height hold")
   print("B Return above pad / hold here")
   print("N Descend 3 blocks (cancels return)")
@@ -663,7 +743,7 @@ local function draw()
     line(3,"SPACE: engine stop | Q: exit | keys still work")
     line(4,message); return
   end
-  line(1," ROCKET v0.5.4.1 | 5 x 733 kN | I: INFO",1,2048)
+  line(1," ROCKET v0.5.5 | 5 x 733 kN | I: INFO",1,2048)
   local state=(armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or "")
   line(2,state,armed and 32 or 256)
   local filled=math.floor(throttle/15*16+0.5)
@@ -791,8 +871,8 @@ local function handleKey(k)
     elseif k==keys.k then
       if mode=="MANUAL" and basis and telemetry and os.clock()-telemetry.time<=0.25 and throttle>0 and telemetry.tilt and telemetry.tilt<math.rad(5) and norm(telemetry.w)<0.05 then
         matrix,calThrottle,calMass=nil,nil,nil
-        mode="CALIBRATE"; cal={stage=1,samples={},mass=telemetry.mass}
-        stageStart(telemetry); message="Calibration pulses: keep craft clear of supports."
+        mode="CALIBRATE"; cal={mass=telemetry.mass}
+        stageStart(telemetry); message="CAL short probe + brake. Keep clear; C cancels, SPACE stops."
       else message="K needs UP, manual, thrust>0, tilt<5, low rotation." end
     elseif k==keys.r or k==keys.f or k==keys.t or k==keys.g then
       cancelAltitude()
@@ -815,7 +895,7 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
-  startLog(); trace("START","v0.5.4.1; engine fields are acknowledged commands, not measured force")
+  startLog(); trace("START","v0.5.5; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then

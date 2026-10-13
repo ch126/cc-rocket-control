@@ -17,7 +17,7 @@ hist,cmd,g=h.sim([(1,'click',3,11),(1.2,'click',34,12),
                  (1.4,'click',23,12),(1.8,'click',5,15)],gui=True,duration=3)
 assert all(abs(p-8063)<1e-6 for p in t.state_at(hist,1.6)['powers'])
 assert all(p==0 for p in t.state_at(hist,2.8)['powers'])
-assert 'ROCKET v0.5.4' in h.txt(hist)
+assert 'ROCKET v0.5.5' in h.txt(hist)
 assert g.outcome[1],g.outcome[2]
 for size in ((70,25),(26,10)):
     hist,cmd,g=h.sim(gui=True,screen_size=size,duration=2)
