@@ -145,6 +145,7 @@ function M.step(state,sample,now)
     out.poweredPositionHold=false
     local reason
     if height<=brakeHeight then reason="VERTICAL_BRAKING_HEIGHT"
+    elseif sample.controlAuthorityLimited==true then reason="CONTROL_AUTHORITY"
     elseif lateralPlan.needsCorrection and lateralPlan.requiredTime+p.ignitionDelay+0.25>=lateralPlan.availableTime then
       reason="LATERAL_CORRECTION_TIME"
     elseif sample.tilt>math.rad(5) then reason="ATTITUDE_MARGIN"
@@ -152,6 +153,8 @@ function M.step(state,sample,now)
     if reason then
       state.ignitionReason=reason
       state.phase="BRAKE"; state.ignited=true; state.burnStart=now
+      state.supportY=sample.y
+      state.alignBeforeDescent=reason=="LATERAL_CORRECTION_TIME" or reason=="CONTROL_AUTHORITY"
       state.burnDeadline=now+math.min(300,math.max(60,math.max(0,height)/2+30))
     else out.mainThrottle=0 end
   end
@@ -160,6 +163,18 @@ function M.step(state,sample,now)
     -- Conservative descent envelope into a hover above the reference plane,
     -- not a touchdown burn. Once lit, never re-enter COAST during this run.
     local desiredVy=height>=0 and -math.min(3,0.5*height,math.sqrt(2*net*0.3*height)) or math.min(0.5,-0.5*height)
+    -- Powered guidance must not keep using a ballistic time horizon: hovering
+    -- changes that horizon and can leave residual lateral error indefinitely.
+    local ax,az=0.15*(state.pad.x-sample.x)-0.8*sample.vx,0.15*(state.pad.z-sample.z)-0.8*sample.vz
+    local amag=math.sqrt(ax*ax+az*az)
+    if amag>p.lateralAccelMin then ax,az=ax*p.lateralAccelMin/amag,az*p.lateralAccelMin/amag end
+    out.lateral.ax,out.lateral.az=ax,az
+    out.lateralAcceleration={x=ax,z=az}
+    if state.alignBeforeDescent and lateral<0.75 and lateralSpeed<0.15 then state.alignBeforeDescent=false end
+    if state.alignBeforeDescent then
+      desiredVy=clamp(0.35*(state.supportY-sample.y),-0.5,0.5)
+      out.heightPriority="HOLD_WHILE_CORRECTING"
+    end
     local errorV=desiredVy-sample.vy
     local gravity=(p.gravityMin+p.gravityMax)/2
     local gain=(p.accelPerThrottleMin+p.accelPerThrottleMax)/2
@@ -171,9 +186,8 @@ function M.step(state,sample,now)
     out.mainThrottle=clamp((gravity+2*errorV+state.velocityIntegral)/denominator,0,p.maxThrottle)
     -- An early lateral trigger at near-zero vertical speed must actually request
     -- powered support, not calculate zero from a fast descent velocity target.
-    if state.ignitionReason=="LATERAL_CORRECTION_TIME" and lateralPlan.needsCorrection then
+    if state.alignBeforeDescent and now-state.burnStart<=p.ignitionDelay+0.25 then
       out.mainThrottle=math.max(out.mainThrottle,math.min(p.maxThrottle,gravity/denominator))
-      out.heightPriority="HOLD_WHILE_CORRECTING"
     end
     -- Ignition delay is already spent once burning. Reusing the COAST trigger
     -- here would repeatedly command full power near hover and cause a bounce.

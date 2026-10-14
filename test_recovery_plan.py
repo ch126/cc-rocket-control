@@ -63,6 +63,11 @@ state=start()
 out=m.step(state,sample(.1,tilt=math.radians(6)),.1)
 assert out.ignitionReason=='ATTITUDE_MARGIN'
 state=start()
+out=m.step(state,sample(.1,controlAuthorityLimited=True),.1)
+assert out.ignitionReason=='CONTROL_AUTHORITY' and out.phase=='BRAKE' and out.mainThrottle>0
+out=m.step(state,sample(.2),.2)
+assert out.phase=='BRAKE' and out.mainThrottle>0
+state=start()
 out=m.step(state,sample(-1),.1)
 assert out.phase=='FAULT' and out.mainThrottle is None
 state=start()
