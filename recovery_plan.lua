@@ -94,7 +94,7 @@ local function validSample(s,now,p)
   return true
 end
 
-function M.start(profile,pad,sample,now)
+local function begin(profile,pad,sample,now,fromBoostback)
   local ok,why=M.validate(profile)
   if not ok then return nil,why end
   if type(pad)~="table" or not finite(pad.x) or not finite(pad.y) or not finite(pad.z) then
@@ -103,11 +103,12 @@ function M.start(profile,pad,sample,now)
   ok,why=validSample(sample,now,profile)
   if not ok then return nil,why end
   if distance(pad,sample)>64 then return nil,"Pad outside 64-block horizontal envelope" end
-  if sample.tilt>math.rad(3) or math.abs(sample.vy)>0.3 or math.sqrt(sample.vx^2+sample.vz^2)>1 then
+  if fromBoostback and profile.boostbackVerified~=true then return nil,"Boostback entry not verified" end
+  if not fromBoostback and (sample.tilt>math.rad(3) or math.abs(sample.vy)>0.3 or math.sqrt(sample.vx^2+sample.vz^2)>1) then
     return nil,"Start from stable powered hover, not an existing uncontrolled fall"
   end
   local required=M.stoppingHeight(profile,-profile.gravityMax)
-  if sample.y-pad.y-M.hoverAbovePad<math.max(30,required) then
+  if sample.y-pad.y-M.hoverAbovePad<(fromBoostback and profile.margin or math.max(30,required)) then
     return nil,"Not enough height above the 20-block hover target"
   end
   local copy={}; for k,v in pairs(profile) do copy[k]=v end
@@ -115,6 +116,9 @@ function M.start(profile,pad,sample,now)
           targetY=pad.y+M.hoverAbovePad,coastStart=now,startTime=now,lastTime=now,
           ignited=false,velocityIntegral=0},nil
 end
+
+function M.start(profile,pad,sample,now) return begin(profile,pad,sample,now,false) end
+function M.startFromBoostback(profile,pad,sample,now) return begin(profile,pad,sample,now,true) end
 
 local function fail(state,reason)
   state.phase="FAULT"; state.reason=reason
@@ -148,7 +152,7 @@ function M.step(state,sample,now)
     elseif sample.controlAuthorityLimited==true then reason="CONTROL_AUTHORITY"
     elseif lateralPlan.needsCorrection and lateralPlan.requiredTime+p.ignitionDelay+0.25>=lateralPlan.availableTime then
       reason="LATERAL_CORRECTION_TIME"
-    elseif sample.tilt>math.rad(5) then reason="ATTITUDE_MARGIN"
+    elseif sample.tilt>math.rad(5) or sample.angularSpeed>.06 then reason="ATTITUDE_MARGIN"
     elseif now-state.coastStart>15 then reason="COAST_TIMEOUT" end
     if reason then
       state.ignitionReason=reason

@@ -49,3 +49,14 @@ for bad in ({'mainKN':float('nan')},{'topKN':[-1,1,1,1]},{'steps':4},{'slewSteps
     except Exception: pass
     else: raise AssertionError(bad)
 print('PASS: coupled independent plant, four lateral directions, attitude correction, gimbal slew, thrust caps, insufficient coast authority and validation.')
+
+# Sub-step requests must not disappear forever at quantized main nozzles.
+lim=limits.copy(); sums=[0.]*6
+for _ in range(200):
+    out=solve(vec(.1,10,0),lim=lim)
+    got=actual(out)
+    for i in range(6): sums[i]+=got[i]
+    lim['balance']=[out.balance[i] for i in range(1,7)]
+    lim['previous']=dict(x=out.mainX,y=out.mainY)
+assert abs(sums[0]/200-.1)<.01 and abs(sums[5]/200)<.001,sums
+print('PASS: bounded acceleration-time residual realizes sub-step lateral demand on average.')

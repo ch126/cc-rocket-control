@@ -13,6 +13,16 @@ function M.solve(model,profile,main,top,request,limits)
   local target={request.linear.x,request.linear.y,request.linear.z,request.angular.x,request.angular.y,request.angular.z}
   for i=1,6 do assert(finite(target[i]),"Invalid acceleration target") end
   assert(target[2]>=0,"Negative main-axis acceleration unsupported")
+  local original={}; for i=1,6 do original[i]=target[i] end
+  local dt=limits.dt or .1
+  assert(finite(dt) and dt>0 and dt<=.25,"Invalid allocation interval")
+  local balance=limits.balance or {0,0,0,0,0,0}
+  for i=1,6 do
+    assert(finite(balance[i]),"Invalid allocation balance")
+    -- Main gimbal steps are coarse. Carry bounded acceleration-time residual
+    -- across frames instead of allowing small requests to round to zero forever.
+    if i~=2 then target[i]=target[i]+clamp(balance[i],i<=3 and -.2 or -.01,i<=3 and .2 or .01)/dt end
+  end
   local previous=limits.previous or {x=0,y=0}
   assert(finite(previous.x) and finite(previous.y) and previous.x%1==0 and previous.y%1==0,"Invalid previous steps")
   local slew=limits.slewSteps or 1
@@ -62,6 +72,12 @@ function M.solve(model,profile,main,top,request,limits)
     end
   end end
   assert(best,"No reachable gimbal setting under slew limit")
+  best.balance={}
+  for i=1,6 do
+    best.residual[i]=original[i]-best.predicted[i]
+    local cap=i<=3 and .2 or .01
+    best.balance[i]=i==2 and 0 or clamp(balance[i]+best.residual[i]*dt,-cap,cap)
+  end
   best.angularError=norm3(best.residual[4],best.residual[5],best.residual[6])
   best.lateralError=norm3(best.residual[1],0,best.residual[3])
   best.verticalError=math.abs(best.residual[2])
