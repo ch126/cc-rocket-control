@@ -73,4 +73,11 @@ if __name__=='__main__':
         assert g.driver.fault and all(e.gate==0 or e.output==0 for e in g.motors.values())
     h,c,g=sim([t.key(1,'e'),t.key(1.2,'r'),(1.4,'slow_output',1),t.key(1.5,'w')],duration=4)
     assert g.driver.fault and cleared(g)
+    # Unchanged throttle used to refresh lastAck without any server call.
+    h,c,g=sim([t.key(1,'e'),t.key(1.2,'r'),(1.8,'slow_output',1)],duration=4)
+    assert g.driver.fault and cleared(g), 'Stalled constant-output link must time out'
+    h,c,g=sim([t.key(1,'e'),t.key(1.2,'r')],duration=3)
+    assert any(call[0]>2 and call[2]=='setThrust' and call[3]==15 for call in c)
+    assert not g.driver.fault and cleared(g)
+    print('PASS: constant output requires real periodic server acknowledgement; stalled unchanged outputs fault.')
     print('PASS: async nine-output routing, startup zero, pending-write drain, coast, stale stream, cap rejection, missing engines, write faults and slow-output watchdog.')

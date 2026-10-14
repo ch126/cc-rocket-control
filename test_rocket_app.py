@@ -34,6 +34,19 @@ profile=dict(version=2,craftId='test-craft',mass=100,gravityMin=9,gravityMax=10,
 config=dict(profile=profile,caps=[733]*5+[100]*4,limits=a.limits,
     craft=dict(id='test-craft',profile=a.p,main=a.main,top=a.top,
         basis=dict(up=a.vec(0,1,0),a=a.vec(1,0,0),b=a.vec(0,0,-1))))
+import copy
+for kind in ('braking_cap','mass','inertia','basis','main_facing','top_facing'):
+    bad=copy.deepcopy(config)
+    if kind=='braking_cap': bad['limits']['mainKN']=100; bad['caps'][:5]=[100]*5
+    if kind=='mass': bad['craft']['profile']['mass']=150
+    if kind=='inertia': bad['craft']['profile']['inverseInertia'][0][0]=-1
+    if kind=='basis': bad['craft']['basis']['b']=a.vec(1,0,0)
+    if kind=='main_facing': bad['craft']['main'][0]['facing']='down'
+    if kind=='top_facing': bad['craft']['top'][0]['facing']='up'
+    h,c,g=t.simulate([],source=invalid_source,gui=True,engine_count=9,duration=1,
+        expected_top=9,program_args=('--live','bad.json'),records={'bad.json':json.dumps(bad)})
+    assert not g.validationOutcome[1] and not c and g.redstoneOutputs.top==9,kind
+print('PASS live configuration rejection before writes: insufficient braking cap, mass, inertia, basis and engine directions.')
 for quit_event in (t.key(2.3,'q'),(2.3,'terminate')):
     h,c,g=t.simulate([t.key(1.2,'j'),t.key(1.4,'e'),t.key(1.6,'r'),quit_event],
         source=source,gui=True,engine_count=9,duration=3,program_args=('--live','synthetic.json'),

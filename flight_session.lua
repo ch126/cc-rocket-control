@@ -4,6 +4,28 @@ local function finite(n) return type(n)=="number" and n==n and math.abs(n)<math.
 function M.new(deps,driver,config)
   local valid,why=deps.planner.validate(config.profile); assert(valid,why)
   assert(config.craft.id==config.profile.craftId,"Geometry identity mismatch")
+  local geometry=config.craft.profile
+  assert(finite(geometry.mass) and math.abs(geometry.mass/config.profile.mass-1)<=.02,"Geometry/profile mass mismatch")
+  -- Planner throttle=1 means 733 kN per main engine. Clipping below its stated
+  -- maximum would invalidate stopping-height predictions, even if caps agree.
+  assert(finite(config.limits.mainKN) and config.limits.mainKN>=733*config.profile.maxThrottle,
+    "Main limit cannot deliver profile braking throttle")
+  assert(#config.craft.main==5 and #config.craft.top==4,"Need exact five-main/four-top geometry")
+  for _,e in ipairs(config.craft.main) do
+    assert(e.facing=="up","Main geometry must face body +Y")
+    deps.geometry.response(geometry,e,1,0,0)
+  end
+  for _,e in ipairs(config.craft.top) do
+    local response=deps.geometry.response(geometry,e,1,0,0)
+    assert(math.abs(response.force.y)<1e-9,"Top geometry must be horizontal")
+  end
+  local basis=config.craft.basis
+  for _,v in ipairs({basis.up,basis.a,basis.b}) do
+    assert(finite(v.x) and finite(v.y) and finite(v.z) and math.abs(v.x^2+v.y^2+v.z^2-1)<1e-6,"Invalid unit basis")
+  end
+  local function dot(a,b) return a.x*b.x+a.y*b.y+a.z*b.z end
+  assert(math.abs(basis.up.x)<1e-6 and math.abs(basis.up.y-1)<1e-6 and math.abs(basis.up.z)<1e-6 and
+    math.abs(dot(basis.up,basis.a))<1e-6 and math.abs(dot(basis.up,basis.b))<1e-6 and math.abs(dot(basis.a,basis.b))<1e-6,"Invalid orthogonal upright basis")
   assert(type(config.caps)=="table" and #config.caps==9,"Nine explicit engine limits required")
   for i=1,9 do
     local cap=i<=5 and config.limits.mainKN or config.limits.topKN[i-5]

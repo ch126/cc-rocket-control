@@ -91,8 +91,9 @@ function M.new(api,caps)
       return self.armed and not self.fault and self.epoch==epoch and e.generation==generation and
         self.desired[i].kn>0 and api.clock()-self.lastInput<=.35
     end
-    local complete=true
+    local complete,didIO=true,false
     local function send(method,...)
+      didIO=true
       local ok,err=pcall(api.peripheral.call,e.name,method,...)
       if not ok then complete=false; self:fail(e.name.." "..method..": "..tostring(err)) end
       return ok
@@ -108,7 +109,13 @@ function M.new(api,caps)
       if complete and valid() and (e.x~=s.vectorX or e.y~=s.vectorY) and send("setVector",s.vectorX,s.vectorY) then e.x,e.y=s.vectorX,s.vectorY end
       if complete and valid() and e.gate~=15 and send("setThrust",15) then e.gate=15 end
     end
-    if complete and epoch==self.epoch and generation==e.generation then e.lastAck=api.clock() end
+    -- A cache-only loop is NOT a server acknowledgement. Refresh an unchanged
+    -- gate periodically using a real call so a stalled link cannot look fresh.
+    if complete and not didIO and epoch==self.epoch and generation==e.generation and api.clock()-e.lastAck>=.15 then
+      local gate=valid() and 15 or 0
+      if send("setThrust",gate) then e.gate=gate end
+    end
+    if complete and didIO and epoch==self.epoch and generation==e.generation then e.lastAck=api.clock() end
   end
   function self:watchdog()
     if not self.armed then return end
