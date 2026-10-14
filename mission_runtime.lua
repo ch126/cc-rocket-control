@@ -2,7 +2,7 @@
 -- Default shadow mode never invokes the driver. Explicit live mode requires an
 -- already initialized/armed engine_io backend and a validated recovery profile.
 local M={version=1}
-function M.start(deps,driver,profile,pad,sample,now,craft,limits,mode)
+function M.start(deps,driver,profile,pad,sample,now,craft,limits,mode,entry)
   mode=mode or "shadow"
   if mode~="shadow" and mode~="live" then return nil,"Unknown runtime mode" end
   local valid,why=deps.planner.validate(profile); if not valid then return nil,why end
@@ -14,10 +14,10 @@ function M.start(deps,driver,profile,pad,sample,now,craft,limits,mode)
       if type(cap)~="number" or cap>driver.caps[i] then return nil,"Planner cap exceeds driver cap" end
     end
   end
-  local mission,err=deps.mission.start(deps,profile,pad,sample,now)
+  local mission,err=deps.mission.start(deps,profile,pad,sample,now,entry)
   if not mission then return nil,err end
   return {mission=mission,mode=mode,driver=driver,profile=profile,pad=pad,craft=craft,limits=limits,
-    phase="RETURN",lastTime=now},nil
+    phase=mission.phase,lastTime=now},nil
 end
 function M.step(deps,state,sample,now)
   if state.phase=="FAULT" then return {manualTakeover=true,error=state.reason} end

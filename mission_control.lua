@@ -1,7 +1,17 @@
 -- Shadow orchestration of RETURN -> COAST -> BRAKE -> HOVER_HANDOFF.
 -- No actual I/O. Hot staging and tower capture are not implemented here yet.
 local M={version=1}
-function M.start(deps,profile,pad,sample,now)
+function M.start(deps,profile,pad,sample,now,entry)
+  entry=entry or "boostback"
+  if entry=="descent" then
+    -- Single-stage drop/return test: only enter from verified stable hover.
+    -- No upper stage, separation or tower hardware is involved.
+    local recovery,why=deps.planner.start(profile,pad,sample,now)
+    if not recovery then return nil,why end
+    return {phase="RECOVERY",recovery=recovery,profile=profile,
+      previous=nil,lastControlTime=now},nil
+  end
+  if entry~="boostback" then return nil,"Unknown mission entry" end
   local burn,why=deps.boostback.start(deps.planner,profile,pad,sample,now)
   if not burn then return nil,why end
   return {phase="RETURN",burn=burn,profile=profile,previous=nil,lastControlTime=now},nil
