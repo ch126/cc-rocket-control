@@ -24,7 +24,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
              fail_method=None, blocked=False, reverse=False, gain=.05, hover=5,
              initial_throttle=0, cap=6666666.666667, smoothing=True,
              source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False,
-             vertical_gain=1, gui=False, disk_capacity=None, screen_size=(51,19), engine_count=5):
+             vertical_gain=1, gui=False, disk_capacity=None, screen_size=(51,19), engine_count=5, program_args=()):
     lua=LuaRuntime(unpack_returned_tuples=True)
     _runtimes.append(lua)
     lua.execute('collectgarbage("stop")')
@@ -35,6 +35,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
     g.enqueue=enqueue
     g.source=source; g.latency=latency; g.maximum=cap
     g.engineCount=engine_count
+    g.programArgs=lua.table_from(program_args)
     names=[f'creative_vector_thruster_{i}' for i in range(engine_count)]
     g.disk=lua.table_from(records or {})
     g.initialThrottle=initial_throttle
@@ -168,7 +169,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
           end
           return {readAll=function() return disk[p] end,close=function() end}
         end}
-      controller=coroutine.create(function() outcome=table.pack(pcall(assert(load(source)))) end)
+      controller=coroutine.create(function() outcome=table.pack(pcall(assert(load(source)),table.unpack(programArgs))) end)
       function resumeController(...) return coroutine.resume(controller,...) end
       function finished() return coroutine.status(controller)=='dead' end
     ''')

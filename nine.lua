@@ -1,4 +1,4 @@
--- v0.6.2-nine: five main engines + four independent, bounded RCS test outputs.
+-- v0.6.3-nine: calibration required before arming; commissioning is explicit.
 -- Experimental single-engine response collection, NOT free-fall control.
 -- Return holds current altitude. No terrain sensing, auto-landing or tower catch.
 -- One controller only. Remove old redstone inputs before using this backend.
@@ -6,6 +6,7 @@
 -- Use setThrustOutput (unquantized base force) + setThrust(15/0) instead.
 -- setVector is also rounded to 1/15 steps by the installed mod; do not fake precision.
 local args = {...}
+local commissioning=args[1]=="--commissioning"
 local M = {}
 local FULL_THRUST_KN=733 -- User-confirmed per-engine full-scale base thrust.
 local RCS_MAX_KN=4 -- Probe ceiling, not the configured 733 kN base force.
@@ -444,7 +445,7 @@ local function loadRecord()
   if not fs.exists(path) and fs.exists(path..".bak") then path=path..".bak" end
   if not fs.exists(path) then
     recordStatus="No saved calibration"
-    message="L: no calibration file on this computer. Restore it, or U then K for new calibration."
+    message="No calibration. Flight locked; run inspect.lua landed. Do not lift off to calibrate."
     return
   end
   assert(fs.getSize(path)<=16384,"Calibration file too large")
@@ -767,7 +768,7 @@ local function tick()
 end
 local function drawText()
   term.clear(); term.setCursorPos(1,1)
-  print("ROCKET v0.6.2-nine | 5 MAIN + 4 RCS")
+  print("ROCKET v0.6.3-nine | 5 MAIN + 4 RCS")
   print(("RCS %d %s %.1f kN | LEFT/RIGHT select | X power | O probe"):format(rcsSelected,RCS_SIDES[rcsSelected],rcsTestKN))
   print((armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or ""))
   print(("Power %.1f%% | base %.2f kN/engine"):format(throttle/15*100,FULL_THRUST_KN*throttle/15))
@@ -779,7 +780,7 @@ local function drawText()
   print("U New UP+pad | J Set pad (disarmed)")
   print("E Arm | R/F +/-1% | T/G +/-0.1%")
   print(("W/S D/A trim: X%+d Y%+d | C reset"):format(pitch,yaw))
-  print("K Short probe + brake; thrust unchanged")
+  print(commissioning and "TEST MODE: K short probe; no automatic rescue" or "K disabled | No calibration = ARM LOCKED")
   print("H Upright | V Position+height hold")
   print("B Return above pad / hold here")
   print("N Descend 3 blocks (cancels return)")
@@ -819,9 +820,9 @@ local function draw()
     line(3,"SPACE: engine stop | Q: exit | keys still work")
     line(4,message); return
   end
-  line(1," ROCKET v0.6.2-nine | 5 MAIN + 4 RCS | I: INFO",1,2048)
+  line(1," ROCKET v0.6.3-nine | 5 MAIN + 4 RCS | I: INFO",1,2048)
   local state=(armed and "ARMED " or "DISARMED ")..mode..(altitude and (altitude.descending and " DESCEND" or " ALT") or "")..(nav and (nav.returning and (nav.arrived and " HOME" or " RETURN") or " POS") or "")
-  line(2,state,armed and 32 or 256)
+  line(2,state..(commissioning and " TEST MODE" or (not matrix and " ARM LOCKED" or "")),armed and 32 or 256)
   local filled=math.floor(throttle/15*16+0.5)
   line(3,("Power %5.1f%% [%s%s] %s"):format(throttle/15*100,string.rep("#",filled),string.rep("-",16-filled),altitude and "AUTO" or "MANUAL"),16)
   local t=telemetry
@@ -890,6 +891,10 @@ local function handleKey(k)
     if k~=keys.q and k~=keys.e then message="During probe: C cancels, SPACE stops all nine."; return end
   end
   if k==keys.e then
+    if not armed and not matrix and not commissioning then
+      message="ARM LOCKED: no calibration. Landed inspection required; do not lift off."
+      return
+    end
     if not armed and (ioFault or not outputsZero() or not telemetry or os.clock()-telemetry.time>0.25) then
       message=ioFault and "Engine fault latched; fix wiring and restart." or "Wait: nine zeros + fresh telemetry required."
       return
@@ -927,7 +932,7 @@ local function handleKey(k)
     basis=M.basis(t.q); referenceId=t.id; launchY,pad=t.y,checked(t.position)
     padCapturedAt=t.time; trace("PAD_SET","U: launch reference captured")
     matrix,calThrottle,calMass=nil,nil,nil
-    message="UP set. Next: manual test, then K calibration."
+    message=commissioning and "COMMISSIONING: uncalibrated test only; no automatic rescue." or "UP set. Flight locked until calibrated; run inspect.lua landed."
   elseif armed then
     if k==keys.c then cancelAltitude(); recovery=nil; mode,cal,pitch,yaw="MANUAL",nil,0,0; message="Manual; thrust unchanged."
     elseif mode=="CALIBRATE" then message="Calibrating. C cancels; SPACE stops."
@@ -979,6 +984,8 @@ local function handleKey(k)
         else resetAttitude(); mode="HOLD"; message="Damped upright hold. V adds position + height hold." end
       else message="Need calibration, tilt<70, thrust 0.5-2x cal." end
     elseif k==keys.k then
+      if not commissioning then message="K disabled in flight mode. Calibration procedure under development."; return end
+      if flightLog.status~="ON" or flightLog.bytes>LOG_LIMIT-20000 then message="K needs active log with 20 KiB room."; return end
       if mode=="MANUAL" and basis and telemetry and os.clock()-telemetry.time<=0.25 and throttle>0 and telemetry.tilt and telemetry.tilt<math.rad(5) and norm(telemetry.w)<0.05 then
         matrix,calThrottle,calMass=nil,nil,nil
         mode="CALIBRATE"; cal={mass=telemetry.mass}
@@ -1005,7 +1012,7 @@ local function main()
   local errors=clearEngines()
   assert(#errors==0,table.concat(errors,"; "))
   initializeEngines()
-  startLog(); trace("START","v0.6.2-nine; engine fields are acknowledged commands, not measured force")
+  startLog(); trace("START","v0.6.3-nine; commissioning="..tostring(commissioning).."; engine fields are acknowledged commands, not measured force")
   local function sample()
     local ok,err=pcall(tick)
     if not ok then

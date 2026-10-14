@@ -1,4 +1,22 @@
-# Nine-engine experimental controller (v0.6.2-nine)
+# Nine-engine experimental controller (v0.6.3-nine)
+
+## Uncalibrated flight lock
+
+Normal startup now refuses E/arming without a valid calibration. Setting U is
+only an orientation reference and does NOT unlock flight. The former advice
+to lift off manually and then press K is withdrawn. K is disabled in normal
+flight mode. This change prevents an uncalibrated launch; it does not solve
+initial calibration or provide automatic launch control.
+
+Run `inspect.lua` landed with the controller stopped. It reads mass, center of
+mass, inertia, pose, rates and nine engine states, and saves a uniquely named
+report. It does not write engines, delete logs, or create a calibration. Its
+readings are not proof that the craft is supported or safe to fly.
+
+The explicit `--commissioning` argument retains the earlier experimental K
+workflow for development/test fixtures. It bypasses the no-calibration arm
+lock and is NOT a fix or a recommended procedure for the user's craft. Do not
+use it to repeat the uncalibrated manual liftoff. K also requires log room.
 
 This is an experimental fork of `home.lua`, not the automatic freefall return
 controller. The existing five-engine controller is unchanged. Do not run both.
@@ -26,7 +44,7 @@ nine.lua
 
 The main attitude calibration is stored separately in
 `/rocket-nine-main-calibration-v2.cfg`. Old five-engine calibration is not reused.
-Use the existing U/K calibration workflow after verifying the modified craft.
+The supported initial calibration procedure is still under development.
 J records the pad while disarmed. Do not set U or J in midair to bypass guards.
 
 ## Preliminary top-engine probe

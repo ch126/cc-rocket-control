@@ -4,10 +4,16 @@ import test_wired as t
 
 SOURCE=Path(__file__).with_name('nine.lua').read_text(encoding='utf-8')
 def sim(actions=(), **kw):
+    kw.setdefault('program_args',('--commissioning',))
     return t.simulate(actions, source=SOURCE, engine_count=9, **kw)
 def text(h): return '\n'.join(s['lines'] for s in h)
 
 if __name__=='__main__':
+    h,c,g=sim([t.key(1,'u'),t.key(1.1,'e'),t.key(1.2,'r'),t.key(1.3,'k'),t.key(1.4,'o')],program_args=())
+    assert 'ARM LOCKED' in text(h)
+    assert all(p==0 for s in h for p in s['powers'])
+    assert not any(v[2]=='setThrust' and v[3]>0 for v in c)
+    print('PASS: default uncalibrated arm/throttle/calibration/probe lock.')
     h,c,g=sim([t.key(1,'e'),t.key(1.2,'r')], initial_throttle=15)
     s=t.state_at(h,2)
     assert all(abs(p-7330)<1e-6 for p in s['powers'][:5]),s
@@ -30,6 +36,8 @@ if __name__=='__main__':
     records={}
     h,c,g=sim(t.setup(),duration=16,records=records)
     assert '/rocket-nine-main-calibration-v2.cfg' in records,text(h)[-2000:]
+    h,c,g=sim([t.key(1,'e'),t.key(1.2,'r')],records=records.copy(),program_args=())
+    assert any(s['powers'][0]>0 for s in h)
     # Record launch pad after calibration, lift safely, capture position/height.
     actions=[t.key(1,'j'),t.key(1.2,'e')]+[t.key(1.4+i*.02,'r') for i in range(33)]
     actions += [t.key(3,'h'),(4,'lift',25),t.key(8,'v'),t.key(9,'o')]
