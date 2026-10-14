@@ -32,12 +32,21 @@ def build():
     parts.append(app)
     return ''.join(parts)
 
+def build_probe():
+    backend=(ROOT/'engine_io.lua').read_text(encoding='utf-8')
+    entry=(ROOT/'fixed_probe.lua').read_text(encoding='utf-8')
+    return ('-- GENERATED fixed-craft test. No automatic ignition or flight approval.\n'
+            'local backend=(function()\n'+backend+'\nend)()\n'
+            'local function require(name) assert(name=="engine_io"); return backend end\n'+entry)
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('--check',action='store_true')
-    args=parser.parse_args(); content=build(); target=ROOT/'rocket_bundle.lua'
-    if args.check:
-        assert target.read_text(encoding='utf-8')==content, 'Bundle stale: run build_bundle.py'
-        print('PASS: bundle matches all current source modules')
-    else:
-        target.write_text(content,encoding='utf-8',newline='\n')
-        print('Built rocket_bundle.lua:',len(content.encode()),'bytes')
+    args=parser.parse_args()
+    for filename,content in (('rocket_bundle.lua',build()),('fixed_probe_bundle.lua',build_probe())):
+        target=ROOT/filename
+        if args.check:
+            assert target.read_text(encoding='utf-8')==content, 'Bundle stale: '+filename
+            print('PASS: current bundle',filename)
+        else:
+            target.write_text(content,encoding='utf-8',newline='\n')
+            print('Built',filename,len(content.encode()),'bytes')
