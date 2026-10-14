@@ -92,7 +92,7 @@ function M.step(recovery,state,s,now)
     end
     local throttle=clamp((g+2*ev+state.integral)/denom,0,p.maxThrottle)
     if state.phase=="EMERGENCY_LEVEL" then throttle=p.maxThrottle end
-    return {phase=state.phase,targetUp=target,mainThrottle=throttle,
+    return {phase=state.phase,targetUp=target,alignThrustWithTarget=true,mainThrottle=throttle,
       lateral={ax=ax,az=az},predictedMiss=miss,ballisticTime=time,shadowOnly=true}
   end)
   if not ok then state.phase="FAULT"; state.reason=tostring(out); return {phase="FAULT",reason=state.reason,manualTakeover=true,shadowOnly=true} end

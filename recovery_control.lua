@@ -28,7 +28,7 @@ function M.step(deps,state,sample,now,craft,limits,stagePlan)
     local function allocate(lateral,throttle)
       local force=5*733*throttle/craft.profile.mass
       local world=vec(lateral.ax,force*math.cos(tilt),lateral.az)
-      if stagePlan then
+      if stagePlan and stagePlan.alignThrustWithTarget then
         world=vec(stagePlan.targetUp.x*force,stagePlan.targetUp.y*force,stagePlan.targetUp.z*force)
       end
       local body=deps.math.rotate(inverse,world)
