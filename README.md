@@ -6,6 +6,24 @@
 
 ## 九引擎回收开发预览（尚不可实飞）
 
+新增 `geometry_model.lua`：无外设/文件副作用的稳态几何模型，输入同一船体坐标系中的
+质量、重心、逆惯量、引擎中心和方块 facing，输出力、力矩、零角速度下的线/角加速度，
+以及底部引擎稳定偏转一档相对中立的响应差。`test_geometry_model.py` 验证六向、
+两偏转轴符号、单位、平移不变性和错误惯量拒绝。它**不是校准文件、不接管引擎、不允许起飞**。
+
+模型依据本地安装的 Create Propulsion 1.1.5 字节码：
+`VectorThrusterBlockEntity.computeRight/computeExhaustDirectionLocal/getThrustDirectionLocal`，
+`ThrusterForceProvider.createSample`，`AbstractThrusterBlockEntity.sable$physicsTick`，
+`SimulatedThrustAdapter.applyImpulseAtPoint`。零偏转的推力沿 blockstate facing；底部 up
+引擎的正 VectorX/VectorY 分别偏向船体 +X/+Z，斜率为设定值乘 tan(30°)。
+内部推力数值在进入 Sable 队列前除以单位倍率（本安装为 1000），不可再次乘 1000。
+喷口施力点沿推力轴的额外偏移不改变关于重心的力矩，因为这一项的叉积为零。
+CC:Sable 1.3.4 的惯量接口直接读取 MassData，模型不把船体矩阵当成世界矩阵。
+
+限制：输出是无碰撞、稳态推力、零角速度的分析预测，不含喷口渐变、启动延迟、阻挡损失、
+气动阻力、地面接触和非零角速度的陀螺项。不会假定真实重力，不从质量单独猜测悬停油门。
+用户存档坐标、UUID、检查报告只保留在本地工作区，没有放进公共仓库。
+
 **v0.6.3 修正测试顺序：没有有效校准时，正常启动拒绝 E 解锁；U 只记录参考，不能代替校准。**
 撤回“先手动升空再 K”的建议。正常模式禁用 K；旧试喷流程只保留在显式开发测试模式，
 不是用户舰体的校准解决方案。新增 `inspect.lua`，落稳且退出飞控后采集质量、重心、惯量和
