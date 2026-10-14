@@ -24,7 +24,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
              fail_method=None, blocked=False, reverse=False, gain=.05, hover=5,
              initial_throttle=0, cap=6666666.666667, smoothing=True,
              source=SOURCE, horizontal=False, gravity_scale=1, nozzle_lag=.05, log_failure=False,
-             vertical_gain=1, gui=False, disk_capacity=None, screen_size=(51,19)):
+             vertical_gain=1, gui=False, disk_capacity=None, screen_size=(51,19), engine_count=5):
     lua=LuaRuntime(unpack_returned_tuples=True)
     _runtimes.append(lua)
     lua.execute('collectgarbage("stop")')
@@ -34,6 +34,8 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
         heapq.heappush(queue,(float(at),next(counter),event,a,b,callback))
     g.enqueue=enqueue
     g.source=source; g.latency=latency; g.maximum=cap
+    g.engineCount=engine_count
+    names=[f'creative_vector_thruster_{i}' for i in range(engine_count)]
     g.disk=lua.table_from(records or {})
     g.initialThrottle=initial_throttle
     g.absent=missing
@@ -56,7 +58,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
       now=0; nextId=0; lines={}; motors={}; redstoneOutputs={top=9}
       frame={x=0,z=0,vx=0,vz=0,y=50,vy=0,qx=0,qz=0,qw=1,mass=100,id='test-craft'}
       keys={e=1,r=2,f=3,w=4,s=5,d=6,a=7,c=8,space=9,q=10,u=11,k=12,h=13,
-        v=14,n=15,j=16,p=17,l=18,t=19,g=20,b=21,i=22}
+        v=14,n=15,j=16,p=17,l=18,t=19,g=20,b=21,i=22,o=23,x=24,left=25,right=26}
       os={clock=function() return now end,
         pullEventRaw=function(filter) return coroutine.yield(filter) end,
         startTimer=function(dt) nextId=nextId+1; enqueue(now+dt,'timer',nextId); return nextId end}
@@ -118,7 +120,7 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
         end,frame.sensorLatency) end}
       peripheral={isPresent=function(n) return n=='bottom' or (motors[n] and motors[n].present) or false end,
         hasType=function(n,t) return (n=='bottom' and t=='modem') or (motors[n] and motors[n].present and t=='creative_vector_thruster') or false end}
-      for i=0,4 do
+      for i=0,engineCount-1 do
         local name='creative_vector_thruster_'..i
         local e={present=name~=absent,gate=initialThrottle,output=733000,x=0,y=0,cx=0,cy=0}
         motors[name]=e
@@ -235,11 +237,11 @@ def simulate(actions=(), duration=3, latency=.05, records=None, missing=None,
             ok,*rest=as_tuple(g.resumeController(event,a,b))
         assert ok,rest
         history.append(dict(time=at,lines=' '.join(g.lines.values()),
-            powers=[g.motors[n].gate/15*g.motors[n].output for n in NAMES],
+            powers=[g.motors[n].gate/15*g.motors[n].output for n in names],
             x=ax,z=az,y=y,vy=vy,px=px,pz=pz,vx=vx,vz=vz))
         if g.finished(): break
     assert g.finished(),'controller never exited'
-    assert g.redstoneOutputs.top==9
+    assert g.redstoneOutputs.top==(0 if engine_count==9 else 9)
     if records is not None: records.clear(); records.update(dict(g.disk))
     return history,commands,g
 
