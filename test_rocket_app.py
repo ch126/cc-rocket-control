@@ -3,18 +3,17 @@ from pathlib import Path
 import json
 import test_wired as t
 root=Path(__file__).parent
-modules=['recovery_plan','control_allocator','geometry_model','recovery_control','boostback_plan',
-         'mission_control','hover_control','mission_runtime','telemetry','engine_io','flight_session']
-source='\n'.join('package.preload['+json.dumps(n)+']=function()\n'+(root/(n+'.lua')).read_text(encoding='utf-8')+'\nend' for n in modules)
-source+='\nlocal mathSource='+json.dumps((root/'home.lua').read_text(encoding='utf-8'))+'\n'
-source+='''
+from build_bundle import build
+bundle=(root/'rocket_bundle.lua').read_text(encoding='utf-8')
+assert bundle==build(), 'Test the up-to-date released artifact'
+source='''
 colors={black=32768,white=1,cyan=512,orange=2,red=16384,yellow=16}
-loadfile=function(name) assert(name=="home.lua"); return assert(load(mathSource)) end
 textutils.unserializeJSON=textutils.unserialize
 sleep=function(dt) local id=os.startTimer(dt); while true do local e,n=os.pullEventRaw(); if e=="timer" and n==id then return end end end
 '''
-source+=(root/'rocket_app.lua').read_text(encoding='utf-8')
-for actions in ([t.key(.5,'e'),t.key(.7,'r'),t.key(1,'q')],[(.8,'terminate')]):
+source+=bundle
+for actions in ([t.key(.5,'e'),t.key(.7,'r'),t.key(1,'q')],[(.8,'terminate')],
+                [(.5,'click',30,8),(.7,'click',1,9),(1,'click',30,12)]):
     h,c,g=t.simulate(actions,source=source,gui=True,engine_count=9,duration=2,expected_top=9)
     assert g.outcome[1],g.outcome[2]
     assert not c, c
@@ -43,3 +42,11 @@ for quit_event in (t.key(2.3,'q'),(2.3,'terminate')):
     assert any(call[2]=='setThrust' and call[3]==15 for call in c),c
     assert all(engine.gate==0 and engine.output==0 for engine in g.motors.values())
 print('PASS actual console + sampler + workers: explicit J/E/R produce output, Q/terminate drain and clear all nine.')
+h,c,g=t.simulate([(1.2,'click',1,8),(1.4,'click',30,8),(1.6,'click',1,9),
+                  (2.1,'click',1,12),(2.4,'click',30,12)],
+    source=source,gui=True,engine_count=9,duration=3,program_args=('--live','synthetic.json'),
+    records={'synthetic.json':json.dumps(config)})
+assert g.outcome[1],g.outcome[2]
+assert any(call[2]=='setThrust' and call[3]==15 for call in c)
+assert all(engine.gate==0 and engine.output==0 for engine in g.motors.values())
+print('PASS bundled clickable interface: pad/arm/throttle, emergency stop and exit share guarded action path.')

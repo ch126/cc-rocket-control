@@ -8,9 +8,23 @@
 
 ### 统一操作入口（实验版）
 
+单文件打包版 `rocket_bundle.lua` 内置依赖，不会加载 CC 电脑上的旧模块。
+先落稳并退出旧控制器，再下载到**新的文件名**（已有同名文件时换名，不删除旧版）：
+
+```text
+wget https://raw.githubusercontent.com/ch126/cc-rocket-control/main/rocket_bundle.lua rocket-preview.lua
+rocket-preview
+```
+
+以上启动默认只读，约 70 KB；磁盘需保留余量，不自动清理日志或校准。
+可点击按钮或使用原按键，至少需要 30×16 终端；小屏幕只显示提示，空格/Q 仍有效。
+不创建 startup，不在下载后自动运行，不附带伪造的实测配置。
+`python build_bundle.py` 重新构建，`python build_bundle.py --check` 检查与源码一致。
+`test_rocket_app.py` 直接运行打包产物，避免只测试源码而漏测安装版本。
+
 `rocket_app.lua` 默认只读：显示遥测、阶段、基地状态，任何控制键都不写引擎。
-需要同目录的回收模块及 `home.lua`（仅加载其数学函数）。这是多文件程序，
-只下载入口文件不能运行；尚未提供一键安装包。
+源码入口需要同目录的回收模块及 `home.lua`（仅加载其数学函数）；
+普通安装使用上面的单文件打包版，不要仅下载源码入口。
 
 开发接口 `rocket_app --live verified-config.json` 会先验证配置，再**清零九台引擎及六面红石**，
 因此不得在空中或旧控制器运行期间启动。进入后仍需 J 记录受支撑的基地参考，E 零油门解锁，

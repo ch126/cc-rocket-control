@@ -22,29 +22,11 @@ end
 local basis=config and config.craft.basis or {up={x=0,y=1,z=0},a={x=1,y=0,z=0},b={x=0,y=0,z=-1}}
 local sampler=require("telemetry").new({clock=os.clock,sublevel=sublevel,parallel=parallel,peripheral=peripheral},deps.math,basis)
 local running,sample,message=true,nil,"Waiting for fresh telemetry"
+local view=require("console_view")
+local buttons={}
 local function draw()
-  local width,height=term.getSize()
-  term.setBackgroundColor(colors.black); term.setTextColor(colors.white); term.clear()
-  local function line(y,text,color)
-    if y>height then return end
-    term.setCursorPos(1,y); term.setTextColor(color or colors.white); term.write(text:sub(1,width))
-  end
-  line(1,"ROCKET | "..(live and session.mode or "READ ONLY"),colors.cyan)
-  line(2,"Stages: RETURN > COAST > BRAKE > HOVER")
-  if sample then
-    line(3,("Y %.2f  Vy %+.2f  Tilt %.1f"):format(sample.y,sample.vy,math.deg(sample.tilt)))
-    line(4,("Read %.3fs | links %s"):format(sample.acquisitionSeconds,sample.allNineReady and "ACK OK" or "NOT READY"))
-  else line(3,"Telemetry unavailable",colors.orange) end
-  local out=session and session.output
-  line(5,"Phase: "..(out and out.plan and out.plan.phase or "--"))
-  line(6,"Pad: "..(session and session.pad and "SET (session only)" or "NOT SET"))
-  line(8,"J pad (supported) | E arm at zero")
-  line(9,"R/F manual +/-1% | V hover here")
-  line(10,"D descent return | B boostback return")
-  line(11,"SPACE emergency cutoff | Q exit",colors.red)
-  line(12,"No upper stage / tower hardware",colors.orange)
-  line(14,live and "Fault/exit cuts engines; NOT a safe landing" or "READ ONLY: no engine writes",colors.orange)
-  line(height,message,colors.yellow)
+  buttons=view.draw(term,colors,{live=live,mode=session and session.mode,sample=sample,
+    output=session and session.output,pad=session and session.pad,message=message})
 end
 local function producer()
   parallel.waitForAny(function()
@@ -62,15 +44,19 @@ local function producer()
     local actions={[keys.j]="pad",[keys.e]="arm",[keys.r]="up",[keys.f]="down",
       [keys.v]="hover",[keys.d]="descent",[keys.b]="boostback",[keys.space]="stop"}
     while running do
-      local event,key,held=os.pullEventRaw()
-      if event=="terminate" or (event=="key" and key==keys.q) then
+      local event,key,held,y=os.pullEventRaw()
+      local action
+      if event=="key" and not held then action=actions[key] end
+      if event=="mouse_click" and key==1 then action=view.hit(buttons,held,y) end
+      if event=="terminate" or (event=="key" and key==keys.q) or action=="exit" then
         if session then session:stop("Operator exit") end
         running=false; return
       end
-      if event=="key" and not held and actions[key] then
+      if event=="term_resize" then draw() end
+      if action then
         if session then
-          local ok,why=session:action(actions[key],sample,os.clock())
-          message=ok and (session.message or actions[key]) or why
+          local ok,why=session:action(action,sample,os.clock())
+          message=ok and (session.message or action) or why
         else message="Read-only mode: controls disabled" end
         draw()
       end
