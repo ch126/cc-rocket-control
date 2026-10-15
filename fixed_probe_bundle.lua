@@ -36,7 +36,10 @@ function M.new(api,caps)
           local ok,err=pcall(api.peripheral.call,e.name,table.unpack(call))
           if not ok then complete=false; errors[#errors+1]=e.name.." "..call[1]..": "..tostring(err) end
         end
-        if complete then e.gate,e.output,e.x,e.y,e.lastAck=0,0,0,0,api.clock() end
+        if complete then
+          e.gate,e.output,e.x,e.y,e.lastAck=0,0,0,0,api.clock()
+          e.acknowledged={kn=0,vectorX=0,vectorY=0,ackTime=e.lastAck}
+        end
       end
     end
     api.parallel.waitForAll(table.unpack(tasks))
@@ -117,7 +120,12 @@ function M.new(api,caps)
       local gate=valid() and 15 or 0
       if send("setThrust",gate) then e.gate=gate end
     end
-    if complete and didIO and epoch==self.epoch and generation==e.generation then e.lastAck=api.clock() end
+    if complete and didIO and epoch==self.epoch and generation==e.generation then
+      e.lastAck=api.clock()
+      -- Immutable completed transaction snapshot. Never expose a partially
+      -- updated output/vector cache as an acknowledged calibration command.
+      e.acknowledged={kn=e.gate==15 and e.output/1000 or 0,vectorX=e.x,vectorY=e.y,ackTime=e.lastAck}
+    end
   end
   function self:watchdog()
     if not self.armed then return end

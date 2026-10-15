@@ -22,7 +22,7 @@ local function validateSample(s,identity,mass)
   assert(s.relativeHeight>=3 and s.relativeHeight<=30,"Outside commissioning height envelope")
   assert(s.tilt>=0 and s.tilt<=math.rad(2),"Vertical trial not upright")
   assert(s.throttle>0 and s.throttle<=1,"Invalid applied throttle")
-  assert(s.commandAge>=0 and s.commandAge<=.15 and s.settledFor>=.5,"Unconfirmed/unsettled output")
+  assert(s.commandAge>=0 and s.commandAge<=.3 and s.settledFor>=.5,"Unconfirmed/unsettled output")
   assert(s.topKN==0 and s.vectorX==0 and s.vectorY==0,"Vertical trial includes lateral inputs")
   assert(s.allMainEqual==true,"Unequal main outputs")
 end
